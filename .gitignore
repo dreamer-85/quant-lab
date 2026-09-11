@@ -40,6 +40,11 @@
 # Include docker launch scripts for Mac/Linux
 !run_docker.sh
 !research/run_docker_notebook.sh
+# Include ResearchEngine cloud deploy scripts
+!deploy/cloud/*.sh
+# Sensitive/kosher local deploy state (never commit)
+deploy/cloud/environment
+deploy/cloud/data/
 
 # QC Config Files:
 # config.json

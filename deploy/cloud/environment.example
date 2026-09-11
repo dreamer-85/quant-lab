@@ -1,0 +1,36 @@
+# ResearchEngine cloud deployment environment.
+# Copy to `environment` (git-ignored) and fill in. Sourced by the deploy scripts.
+# Never commit this file.
+
+# --- Repository -----------------------------------------------------------
+# Public or private repo URL used by setup-vm.sh. Use the https:// form so the
+# clone works on a fresh VM without SSH keys (PAT via GIT_PAT if private).
+export QUANTLAB_REPO_URL="https://github.com/boo100-hub/myEngine.git"
+# Optional: personal access token for a private repo. NEVER commit this value.
+export GIT_PAT=""
+
+# --- Google Cloud Storage ---------------------------------------------------
+# Bucket holding the dataset bundle and receiving job results.
+export QUANTLAB_GCS_BUCKET="gs://your-bucket/organize-with-prefixes"
+# Prefix (subfolder) inside the bucket for this project's data.
+export QUANTLAB_GCS_PREFIX="quantlab"
+# Service account key (path on the VM) used to authenticate gsutil/gcloud.
+# Generated at: IAM & Admin > Service Accounts > Keys > Add Key (JSON).
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/sa-key.json"
+
+# --- Runtime roots (consumed by the engine via ResearchEnvironment) ----------
+# Lean-compatible data root on the VM. Engine reads market-hours/, symbol-properties/
+# and the dataset (crypto/bybit/...) from here.
+export QUANTLAB_DATA_ROOT="/opt/quantlab/data"
+# Research output root on the VM: results, checkpoints, manifest.json.
+export QUANTLAB_OUTPUT_ROOT="/opt/quantlab/output"
+# Scratch/cache root (must be large enough for FullSort materialization).
+export QUANTLAB_CACHE_ROOT="/opt/quantlab/cache"
+# Temp root.
+export QUANTLAB_TEMP_ROOT="/tmp"
+
+# --- .NET ---------------------------------------------------------------------
+export DOTNET_VERSION="10.0"
+
+# --- VM geometry (used only by provision documentation, not the scripts) ------
+# e2-standard-4 (4 vCPU/16 GB) on Debian 12, 200 GB pd-ssd, Debian-based image.

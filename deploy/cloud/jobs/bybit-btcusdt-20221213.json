@@ -1,0 +1,21 @@
+{
+  "jobId": "bybit-btcusdt-20221213",
+  "dataset": "bybit",
+  "symbols": ["BTCUSDT"],
+  "assetClass": "crypto",
+  "venue": "bybit",
+  "resolution": "Minute",
+  "startTime": "2022-12-13T00:00:00Z",
+  "endTime": "2022-12-13T23:59:59Z",
+  "eventTypes": ["Trade", "Quote"],
+  "observationInterval": "00:00:30",
+  "features": ["mid_price", "spread", "trade_volume"],
+  "experimentName": "bybit-btcusdt-baseline",
+  "experimentConfig": {},
+  "horizons": ["00:05:00", "00:30:00"],
+  "outputFormat": "parquet",
+  "engineVersion": "1.0.0",
+  "maxEvents": 0,
+  "enableCheckpointing": true,
+  "reorder": "FullSort"
+}
