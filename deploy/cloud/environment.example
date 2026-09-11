@@ -29,6 +29,15 @@ export QUANTLAB_CACHE_ROOT="/opt/quantlab/cache"
 # Temp root.
 export QUANTLAB_TEMP_ROOT="/tmp"
 
+# --- VM / GCP (used by the Python CLI and gcloud commands) --------------------
+# Compute Engine instance name, zone and project. The CLI submits jobs with
+#   python -m quantlab run cloud jobs/<job>.json
+export QUANTLAB_VM="quantlab-vm"
+export QUANTLAB_ZONE="us-central1-a"
+export QUANTLAB_PROJECT=""
+# Path/name of the cloned repo on the VM (default: myEngine).
+export QUANTLAB_REPO_DIR="myEngine"
+
 # --- .NET ---------------------------------------------------------------------
 export DOTNET_VERSION="10.0"
 

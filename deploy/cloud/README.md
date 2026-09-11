@@ -1,21 +1,57 @@
 # Cloud Deployment (ResearchEngine on GCE)
 
-Scripts to provision a Google Compute Engine VM that builds and runs the
-ResearchEngine, plus helpers to stage data from Google Cloud Storage and sync
-results back.
+Scripts and tooling to provision a Google Compute Engine VM that builds and
+runs the ResearchEngine, stage data via Google Cloud Storage, run jobs on the
+VM or on the workstation, and pull results back to compare locally vs cloud.
+
+Everything is driven by **one** environment file — `deploy/cloud/environment`
+(copied from `environment.example`) — which is parsed both by the bash
+deploy scripts (`source environment`) and by the Python CLI
+(`python -m quantlab env`).
 
 ## Layout
 
 | File | Purpose |
 |------|---------|
 | `environment.example` | Env-template; copy to `environment`, fill in, never commit |
-| `install-dependencies.sh` | Install .NET SDK + git + gcloud/gsutil on Debian/Ubuntu |
+| `install-dependencies.sh` | Install .NET SDK + git + gcloud/gsutil on Debian/Ubuntu (VM) |
+| `install-gcloud-windows.ps1` | Install Google Cloud SDK on the Windows workstation |
 | `setup-vm.sh` | One-time VM bootstrap: clone, build, run test suite, smoke test |
 | `stage-data.sh` | Download dataset bundle from GCS and lay out `$QUANTLAB_DATA_ROOT` |
 | `run-job.sh` | Build (if stale) and run a job; emits `manifest.json` under the output root |
 | `sync-results.sh` | Upload output root to GCS (`--up`) or pull a job down (`--down`) |
 | `jobs/bybit-btcusdt-20221213.json` | Sample job file (Lean `Resolution`/`ReorderMode` enum strings) |
-| `data/` | Holds the bundle files you upload to GCS (git-ignored) |
+
+Plus the unified Python client in `Research/Python/quantlab/`, whose CLI
+(`python -m quantlab`) wraps these scripts so the same job runs identically
+locally or on the VM (see *Unified CLI* below).
+
+## Quick start (local laptop → cloud VM)
+
+```bash
+# 1. On Windows: install the Google Cloud SDK once
+powershell -ExecutionPolicy Bypass -File deploy\cloud\install-gcloud-windows.ps1
+
+# 2. Configure the single environment file
+cp deploy/cloud/environment.example deploy/cloud/environment   # edit values
+python -m quantlab env --show                                   # verify
+
+# 3. Build a dataset bundle from a Lean data root and upload it
+python -m quantlab bundle build --data-root <lean-data> --out data/bybit.tgz
+python -m quantlab bundle upload data/bybit.tgz
+
+# 4. Run the same job locally
+python -m quantlab run local  deploy/cloud/jobs/bybit-btcusdt-20221213.json \
+    --data-dir <lean-data>
+
+# 5. Provision the VM (after it exists), stage data, run there
+gcloud compute ssh quantlab-vm --command "cd ~/myEngine && ./deploy/cloud/setup-vm.sh"
+python -m quantlab run cloud deploy/cloud/jobs/bybit-btcusdt-20221213.json
+
+# 6. Pull cloud results and compare against the local run
+python -m quantlab results download bybit-btcusdt-20221213 --dest out/
+python -m quantlab compare out-local/ out-cloud/
+```
 
 ## Fast path (on a fresh Debian 12 VM)
 
@@ -32,8 +68,8 @@ source environment
 
 ## Environment variables
 
-See `environment.example`. The engine reads the `QUANTLAB_*` vars via
-`ResearchEnvironment` (resolution order: CLI flag > env var > default).
+See `environment.example`. Two consumers read it, so the values must be
+identical for both sides:
 
 | Variable | Meaning |
 |----------|---------|
@@ -43,7 +79,33 @@ See `environment.example`. The engine reads the `QUANTLAB_*` vars via
 | `QUANTLAB_TEMP_ROOT` | Temp root |
 | `QUANTLAB_GCS_BUCKET` | `gs://bucket/prefix` receiving data bundles and results |
 | `QUANTLAB_GCS_PREFIX` | Subfolder inside the bucket (default `quantlab`) |
+| `QUANTLAB_VM` | GCE instance name used by `run cloud` (default `quantlab-vm`) |
+| `QUANTLAB_ZONE` / `QUANTLAB_PROJECT` | gcloud zone/project for the VM |
+| `QUANTLAB_REPO_DIR` | Path of the repo on the VM (default `myEngine`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | VM path to the service-account key JSON |
+
+## Unified CLI (`python -m quantlab`)
+
+From the repo root: `PYTHONPATH=Research/Python python -m quantlab ...`
+
+```
+quantlab run local <job.json> [--data-dir] [--output-dir] [--build]
+quantlab run cloud <job.json> [--vm] [--zone] [--project] [--data-dir] [--output-dir] [--no-scp]
+quantlab bundle build --data-root <lean-data> --out <bundle.tgz> [--extra-dir X]
+quantlab bundle upload <bundle.tgz> [--no-check]
+quantlab results download <job-id> [--dest DIR]
+quantlab compare <local-result> <cloud-result> [--no-files] [--deep]
+quantlab env [--show]
+```
+
+- `bundle build` produces the exact layout `stage-data.sh` expects and verifies
+  the required DB files first.
+- `bundle upload` / `results download` wrap gsutil.
+- `run cloud` scp's the job file to the VM, sources the same `environment`
+  file there, and runs `deploy/cloud/run-job.sh` synchronously.
+- `compare` byte-compares the output files (or deep-compares parquet frames
+  with `--deep`) and field-by-field compares `manifest.json`. Exit code 0
+  means identical.
 
 ## Data contract
 
@@ -57,7 +119,7 @@ symbol-properties/security-database.csv
 crypto/bybit/minute/btcusdt/YYYYMMDD_{trade,quote}.zip   (dataset under crypto/)
 ```
 
-Build a bundle locally and upload it:
+Build and upload a bundle (equivalent manual commands):
 
 ```bash
 tar -czf bybit-btcusdt-20221213.tar.gz -C <data-root> market-hours symbol-properties crypto
@@ -82,5 +144,5 @@ $QUANTLAB_OUTPUT_ROOT/<jobId>/
   experiment/<...>       (experiment outputs)
   checkpoints/           (resume checkpoints if enabled)
 ```
-`manifest.json` is the machine-readable result; capture it for the
-local-vs-cloud equivalence comparison.
+`manifest.json` is the machine-readable result; `quantlab compare` uses it
+(plus the output files) for the local-vs-cloud equivalence check.

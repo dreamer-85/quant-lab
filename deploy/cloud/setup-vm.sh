@@ -45,7 +45,7 @@ dotnet test "${REPO_DIR}/Tests/Research/EngineTests/QuantConnect.Research.Engine
     -c Release
 
 # 5. Smoke test the Runner binary
-RUNNER_DLL="${REPO_DIR}/Research/Runner/bin/Release/QuantConnect.Research.Runner.dll"
+RUNNER_DLL="${REPO_DIR}/Research/Runner/bin/Release/net10.0/QuantConnect.Research.Runner.dll"
 echo "==> Synthetic benchmark smoke test (100k events)"
 dotnet "${RUNNER_DLL}" --synthetic-benchmark 100000 || true
 

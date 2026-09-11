@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantlab"
+version = "0.1.0"
+description = "Unified CLI for the ResearchEngine: run jobs locally or on a GCE VM, stage/upload data bundles, download and compare results."
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+deep = [
+    "pyarrow>=14.0",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+quantlab = "quantlab.cli:main"
+
+[tool.setuptools]
+packages = ["quantlab"]

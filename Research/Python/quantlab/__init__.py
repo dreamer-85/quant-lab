@@ -1,6 +1,8 @@
-"""QuantLab research client.
+"""QuantLab research client: local + cloud orchestration.
 
-Defines research jobs and runs them through the QuantConnect.Research.Runner engine.
+Defines research jobs and runs them through the QuantConnect.Research.Runner
+engine — either locally (Runner DLL) or on a GCE VM (via gcloud/gsutil) —
+and compares the results.
 
 Basic usage:
 
@@ -20,12 +22,54 @@ Basic usage:
         experiment_name="dataset_audit",
     )
 
-    result = run(job, data_dir="C:/Users/KONZA/Desktop/Lean/Data",
+    result = run(job, data_dir="C:/Users/KONZA/Desktop/QuantLab/Lean/Data",
                  runner_dir=None)  # None = auto-detect built runner
     print(result.manifest)
     print(result.load_parquet())  # pandas DataFrame
+
+Unified CLI (cloud orchestration included):
+
+    python -m quantlab env
+    python -m quantlab run local  jobs/my.json --data-dir <lean-data>
+    python -m quantlab bundle build --data-root <lean-data> --out bundle.tgz
+    python -m quantlab bundle upload bundle.tgz
+    python -m quantlab run cloud  jobs/my.json --vm quantlab-vm
+    python -m quantlab results download bybit-btcusdt-20221213 --dest out/
+    python -m quantlab compare out-local/ out-cloud/
 """
 
 from .runner import ResearchJob, ResearchResult, build_runner, find_runner, run
+from .cloud import (
+    CompareResult,
+    compare_local_cloud,
+    download_object,
+    download_results,
+    environment,
+    find_gcloud,
+    find_gsutil,
+    load_environment,
+    make_bundle,
+    run_local,
+    submit_job,
+    upload_bundle,
+)
 
-__all__ = ["ResearchJob", "ResearchResult", "run", "build_runner", "find_runner"]
+__all__ = [
+    "ResearchJob",
+    "ResearchResult",
+    "run",
+    "run_local",
+    "build_runner",
+    "find_runner",
+    "submit_job",
+    "make_bundle",
+    "upload_bundle",
+    "download_results",
+    "download_object",
+    "compare_local_cloud",
+    "CompareResult",
+    "environment",
+    "load_environment",
+    "find_gcloud",
+    "find_gsutil",
+]

@@ -23,18 +23,29 @@ data root by `deploy/cloud/stage-data.sh`.
 
 ```
 [Workstation]                         [GCE VM: Debian 12, .NET 10]
-  git push  ───────────────────────►  git clone myEngine
+  quantlab run local  ───────────►   (same job, same data → identical manifest)
   gsutil cp bundle.tgz ───────────►  gs://<bucket>/quantlab/bundle.tgz
-                                      ./stage-data.sh  → /opt/quantlab/data (Lean layout)
-                                      ./run-job.sh jobs/<job>.json
-                                      ./sync-results.sh --up   → gs output/
-  gsutil cp -r gs://…/output ─────►  local results (equivalence comparison)
+  quantlab run cloud  ───────────►   scp job → source environment → run-job.sh
+  quantlab results download ◄──────  gs output/ → local
+  quantlab compare local cloud      (exit 0 = identical)
 ```
+
+The wiring is the **unified `quantlab` CLI** (`Research/Python/quantlab/`,
+`python -m quantlab`). It reads the *same* `deploy/cloud/environment` file as
+the bash scripts, so one environment configures both sides. See
+`deploy/cloud/README.md` for the full command reference; the walkthrough below
+shows the underlying primitives.
 
 ## 0. Prerequisites (workstation)
 
-- `gcloud` / `gsutil` authenticated on your workstation.
+- Python 3.10+.
+- `gcloud` / `gsutil` authenticated on your workstation. On Windows, run
+  `deploy/cloud/install-gcloud-windows.ps1`, then `gcloud init --console-only`
+  and `gcloud auth application-default login`.
 - A private repo: `github.com/boo100-hub/myEngine`.
+- `deploy/cloud/environment` (from `environment.example`) with
+  `QUANTLAB_VM`, `QUANTLAB_ZONE`, `QUANTLAB_PROJECT`, `QUANTLAB_GCS_BUCKET`.
+- The CLI needs `Research/Python` on `PYTHONPATH` (or `pip install -e Research/Python`, then `quantlab`; install `[deep]` extras for parquet-level `compare --deep`).
 
 ## 1. Provision the VM
 
@@ -66,7 +77,8 @@ gcloud compute scp sa-key.json quantlab-vm:~/
 
 ## 2. Stage the dataset bundle
 
-On the workstation, from a Lean data root that contains at least:
+On the workstation (using the CLI — produces the same layout as the manual
+`tar` command below), from a Lean data root that contains at least:
 
 ```
 market-hours/market-hours-database.json
@@ -77,13 +89,13 @@ crypto/bybit/minute/btcusdt/20221213_quote.zip
 ```
 
 ```bash
-tar -czf bybit-btcusdt-20221213.tar.gz -C <lean-data-root> \
-    market-hours symbol-properties crypto
-gsutil cp bybit-btcusdt-20221213.tar.gz gs://<bucket>/quantlab/
+python -m quantlab bundle build --data-root <lean-data-root> --out bybit-btcusdt-20221213.tar.gz
+python -m quantlab bundle upload bybit-btcusdt-20221213.tar.gz
 ```
 
-Only the subfolders actually needed must be included; `stage-data.sh --verify`
-checks the required DB files exist after extraction.
+Only the subfolders actually needed must be included; `bundle build` verifies
+the required DB files exist before packing, and `stage-data.sh --verify`
+re-checks them after extraction.
 
 ## 3. Bootstrap the VM
 
@@ -104,6 +116,21 @@ gcloud config set project <PROJECT>
 engine test suite, and smoke-tests the Runner binary.
 
 ## 4. Run a job
+
+Locally (the CLI wraps the underlying `dotnet` invocation):
+
+```bash
+python -m quantlab run local deploy/cloud/jobs/bybit-btcusdt-20221213.json --data-dir <lean-data-root>
+```
+
+Exactly the same job without a build on the VM (the CLI scp's the job file and
+runs `deploy/cloud/run-job.sh`):
+
+```bash
+python -m quantlab run cloud deploy/cloud/jobs/bybit-btcusdt-20221213.json
+```
+
+Under the hood, on the VM:
 
 ```bash
 ./run-job.sh jobs/bybit-btcusdt-20221213.json
@@ -129,32 +156,27 @@ and experiment `metrics` (when an experiment factory is configured).
 # On the VM:
 ./sync-results.sh --up <jobId>            # upload one job's output
 
-# On the workstation:
-source environment
-./sync-results.sh --down <jobId> ./results
+# On the workstation (CLI wrapper over gsutil):
+python -m quantlab results download <jobId> --dest ./results
 ```
 
 ## Local-vs-cloud equivalence
 
 The engine is deterministic: identical job + identical data ⇒ identical output.
 The reference manifest from a local run is the ground truth. To verify a cloud
-run:
+run, run locally and compare:
 
-1. Run the same job locally, e.g.:
-   ```bash
-   dotnet Research/Runner/bin/Release/net10.0/QuantConnect.Research.Runner.dll \
-     --job-file deploy/cloud/jobs/bybit-btcusdt-20221213.json \
-     --data-dir <lean-data-root> --output-dir out-local
-   ```
-2. Compare the cloud `manifest.json` fields against the local one
-   (`eventsProcessed`, `observationsWritten`, `symbolsProcessed`).
-3. Byte-compare the observation outputs:
-   ```bash
-   diff <(gunzip -c local.parquet | sha256sum) \
-        <(gsutil cat gs://<bucket>/quantlab/output/<jobId>/...parquet | sha256sum)
-   ```
-   (Parquet equality can also be checked by loading both with pandas and
-   comparing `df.equals` on the whole frame.)
+```bash
+python -m quantlab run local deploy/cloud/jobs/bybit-btcusdt-20221213.json --data-dir <lean-data-root> --output-dir out-local
+python -m quantlab run cloud deploy/cloud/jobs/bybit-btcusdt-20221213.json
+python -m quantlab results download bybit-btcusdt-20221213 --dest out-cloud
+python -m quantlab compare out-local out-cloud        # exit 0 = identical files + manifest
+```
+
+`compare` checks every `manifest.json` field (`eventsProcessed`,
+`observationsWritten`, `symbolsProcessed`, `elapsedSeconds`, ...) and
+byte-compares the output files; pass `--deep` to compare parquet frames with
+pandas (`df.equals`). The manual sha256 approach is equivalent:
 
 ## Checkpoint/resume on the VM
 

@@ -21,7 +21,7 @@ JOB_FILE="${1:-}"
 REPO_DIR="${QUANTLAB_REPO_DIR:-${HOME}/myEngine}"
 
 # Build only if the artifacts are stale or missing.
-RUNNER_DLL="${REPO_DIR}/Research/Runner/bin/Release/QuantConnect.Research.Runner.dll"
+RUNNER_DLL="${REPO_DIR}/Research/Runner/bin/Release/net10.0/QuantConnect.Research.Runner.dll"
 if [ ! -f "${RUNNER_DLL}" ]; then
     echo "==> Building Runner (Release)"
     dotnet build "${REPO_DIR}/Research/Runner/QuantConnect.Research.Runner.csproj" -c Release
