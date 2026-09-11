@@ -87,6 +87,26 @@ Exit code 0 = success, 1 = failed job, 2 = usage error.
 A `manifest.json` is written next to the outputs summarizing
 symbols/events/observations/reuse counts and elapsed time.
 
+### Unified orchestration CLI
+
+`Research/Python/quantlab` (`python -m quantlab`) wraps the Runner for local
+and cloud execution, and adds bundle staging, GCS upload/download, and
+local-vs-cloud comparison. It reads the same `deploy/cloud/environment` file as
+the bash deploy scripts:
+
+```
+quantlab run local <job.json> [--build] [--data-dir] [--output-dir]
+quantlab run cloud <job.json> [--vm] [--zone] [--project] [--no-scp]
+quantlab bundle build --data-root <lean-data> --out <bundle.tgz>
+quantlab bundle upload <bundle.tgz>
+quantlab results download <job-id> [--dest DIR]
+quantlab compare <local-result> <cloud-result> [--no-files] [--deep]
+quantlab env [--show]
+```
+
+See `deploy/cloud/README.md` for the workflow and `cloud-research.md` for the
+cloud runbook.
+
 ## The pipeline
 
 1. **Source** — `IEventDataSource.GetEventStreams(job, symbol)` yields ordered
@@ -120,7 +140,7 @@ The pipeline never holds the dataset in memory:
   elapsed — bounded by `ceil(horizon / observationInterval) + 1` entries, not by
   dataset length.
 
-See `memory-model.md` for profiler results (live managed heap stays ~0.2 MB
+See `bounded-memory.md` for profiler results (live managed heap stays ~0.2 MB
 across 100K/1M/5M events).
 
 ## Tests
