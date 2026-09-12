@@ -22,11 +22,12 @@ ENV QUANTLAB_DATA_ROOT=/quantlab/data \
     QUANTLAB_CACHE_ROOT=/quantlab/cache \
     QUANTLAB_TEMP_ROOT=/tmp
 
+# The aspnet base image already pre-configures a 'app' user (UID 1000) —
+# reuse it instead of creating another user.
 RUN mkdir -p /quantlab/data /quantlab/output /quantlab/cache \
-    && useradd --create-home --uid 1000 quantlab \
-    && chown -R quantlab:quantlab /app /quantlab
+    && chown -R app:app /app /quantlab
 
-USER quantlab
+USER app
 VOLUME ["/quantlab"]
 
 ENTRYPOINT ["dotnet", "QuantConnect.Research.Runner.dll"]
