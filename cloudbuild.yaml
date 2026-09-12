@@ -1,0 +1,35 @@
+# Cloud Build for QuantLab ResearchEngine.
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#       --substitutions=_IMAGE_TAG=$(git rev-parse --short HEAD) .
+#
+# One-time setup (Artifact Registry docker repo, once):
+#   gcloud artifacts repositories create quantlab \
+#       --location=$LOCATION --repository-format=docker
+
+substitutions:
+  _REPO_NAME: 'quantlab'
+  _IMAGE_NAME: 'myengine'
+  _IMAGE_TAG: 'latest'
+
+steps:
+  # 1. Run the engine test suite (64 tests) on the .NET SDK image
+  - name: 'mcr.microsoft.com/dotnet/sdk:10.0'
+    entrypoint: 'dotnet'
+    args:
+      - 'test'
+      - 'Tests/Research/EngineTests/QuantConnect.Research.Engine.Tests.csproj'
+      - '-c'
+      - 'Release'
+
+  # 2. Build the engine image into the project's Artifact Registry repo
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '$LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$_IMAGE_TAG'
+      - '.'
+
+# 3. Push the image (uses the same AR path as the build tag)
+images:
+  - '$LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$_IMAGE_TAG'

@@ -1,0 +1,15 @@
+.git
+**/bin
+**/obj
+**/*.tgz
+**/*.tar.gz
+*.pdb
+
+# Secrets — never part of a build context
+deploy/cloud/.env
+deploy/cloud/environment
+
+# Local run artifacts
+/out
+/Data
+**/node_modules
