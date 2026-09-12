@@ -1,19 +1,26 @@
-# Cloud Build for QuantLab ResearchEngine.
+# Cloud Build for QuantLab ResearchEngine — push-to-deploy pipeline.
 #
-#   gcloud builds submit --config cloudbuild.yaml \
-#       --substitutions=_IMAGE_TAG=$(git rev-parse --short HEAD) .
+# Triggered on every push to main (or run manually):
+#   1. run the engine test suite
+#   2. build + push the image (tagged with the commit SHA and 'latest')
+#   3. create-or-update the Cloud Run Job to run that image
 #
-# One-time setup (Artifact Registry docker repo, once):
-#   gcloud artifacts repositories create quantlab \
-#       --location=$LOCATION --repository-format=docker
+# Usage:
+#   gcloud builds submit --config cloudbuild.yaml .
+# (set `--substitutions=_TAG=...` to trigger without git)
 
 substitutions:
-  _REPO_NAME: 'quantlab'
-  _IMAGE_NAME: 'myengine'
-  _IMAGE_TAG: 'latest'
+  _REGION: 'europe-west1'
+  _REPO_NAME: 'cloud-run-source-deploy'
+  _IMAGE_NAME: 'quant-lab/quant-lab'
+  _JOB_NAME: 'quant-lab'
+  _BUCKET: 'quant-lab'
+  _CPU: '4'
+  _MEMORY: '16Gi'
+  _TIMEOUT: '24h'
 
 steps:
-  # 1. Run the engine test suite (64 tests) on the .NET SDK image
+  # 1. Engine test suite
   - name: 'mcr.microsoft.com/dotnet/sdk:10.0'
     entrypoint: 'dotnet'
     args:
@@ -22,14 +29,48 @@ steps:
       - '-c'
       - 'Release'
 
-  # 2. Build the engine image into the project's Artifact Registry repo
+  # 2. Build + push the image (tagged with commit SHA and 'latest')
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
       - '-t'
-      - '$LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$_IMAGE_TAG'
+      - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$COMMIT_SHA'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:latest'
       - '.'
 
-# 3. Push the image (uses the same AR path as the build tag)
+  # 3. Deploy the image to the Cloud Run Job (idempotent: create or update)
+  #    The job mounts the GCS bucket root: /quantlab/data (RO) + /quantlab/output (RW).
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-euc'
+      - |
+        IMAGE="$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$COMMIT_SHA"
+        SA="quantlab-runner@$PROJECT_ID.iam.gserviceaccount.com"
+        FLAGS=( \
+          --image="$$IMAGE" \
+          --project=$PROJECT_ID \
+          --region=$_REGION \
+          --cpu=$_CPU \
+          --memory=$_MEMORY \
+          --task-timeout=$_TIMEOUT \
+          --service-account="$$SA" \
+          --add-volume name=data,type=cloud-storage,bucket=$_BUCKET,readonly=true \
+          --add-volume-mount volume=data,mount-path=/quantlab/data \
+          --add-volume name=output,type=cloud-storage,bucket=$_BUCKET,readonly=false \
+          --add-volume-mount volume=output,mount-path=/quantlab/output \
+          --set-env-vars=QUANTLAB_DATA_ROOT=/quantlab/data,QUANTLAB_OUTPUT_ROOT=/quantlab/output,QUANTLAB_CACHE_ROOT=/quantlab/cache,QUANTLAB_TEMP_ROOT=/tmp \
+          --args=--job-file=/quantlab/data/job.json,--data-dir=/quantlab/data,--output-dir=/quantlab/output \
+        )
+        if gcloud run jobs describe $_JOB_NAME --project=$PROJECT_ID --region=$_REGION >/dev/null 2>&1; then
+          echo "==> Updating Cloud Run Job $_JOB_NAME"
+          gcloud run jobs update $_JOB_NAME "${FLAGS[@]}"
+        else
+          echo "==> Creating Cloud Run Job $_JOB_NAME"
+          gcloud run jobs create $_JOB_NAME "${FLAGS[@]}"
+        fi
+
 images:
-  - '$LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$_IMAGE_TAG'
+  - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$COMMIT_SHA'
+  - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:latest'
