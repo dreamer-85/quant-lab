@@ -2,6 +2,7 @@
 
 Usage:
     python -m quantlab run    local|cloud  <job.json> [options]
+    python -m quantlab job    create --data-dir <lean-data> [options] [-o out.json]
     python -m quantlab bundle [build|upload] <bundle.tgz> [options]
     python -m quantlab results download <job-id>
     python -m quantlab compare <local-result> <cloud-result>
@@ -19,6 +20,7 @@ import sys
 from pathlib import Path
 
 from . import cloud
+from .discover import build_job, discover_profiles, job_to_dict
 
 DEFAULT_ENV = Path(__file__).resolve().parents[3] / "deploy" / "cloud" / "environment"
 
@@ -36,10 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run_sub = run_p.add_subparsers(dest="where", required=True)
 
     run_local = run_sub.add_parser("local", help="Run a job through the local Runner DLL")
-    run_local.add_argument("job", help="Job JSON file")
+    run_local.add_argument("job", nargs="?", default=None,
+                           help="Job JSON file (omit to auto-generate from --data-dir)")
     run_local.add_argument("--data-dir", default="", help="Lean data root (default: env QUANTLAB_DATA_ROOT)")
     run_local.add_argument("--output-dir", default="", help="Output root (default: temp)")
     run_local.add_argument("--build", action="store_true", help="Build the Runner DLL if missing")
+    _add_auto_job_args(run_local)
 
     run_cloud = run_sub.add_parser("cloud", help="Upload a job to the VM and run it there")
     run_cloud.add_argument("job", help="Job JSON file to copy to the VM")
@@ -50,6 +54,15 @@ def _build_parser() -> argparse.ArgumentParser:
     run_cloud.add_argument("--output-dir", default="", help="Override VM output root")
     run_cloud.add_argument("--repo-dir", default="", help="VM repo dir (default: env QUANTLAB_REPO_DIR)")
     run_cloud.add_argument("--no-scp", action="store_true", help="Job already present on the VM")
+
+    # ---- job -------------------------------------------------------------
+    job_p = sub.add_parser("job", help="Auto-generate a job JSON from the data root")
+    job_sub = job_p.add_subparsers(dest="job_action", required=True)
+
+    job_create = job_sub.add_parser("create", help="Create/debug a job from the data folder layout")
+    job_create.add_argument("--data-dir", required=True, help="Lean data root to scan")
+    job_create.add_argument("-o", "--out", default=None, help="Write job JSON to this path instead of stdout")
+    _add_auto_job_args(job_create)
 
     # ---- bundle ----------------------------------------------------------
     bundle_p = sub.add_parser("bundle", help="Build/upload dataset bundles")
@@ -85,12 +98,70 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_auto_job_args(parser: argparse.ArgumentParser) -> None:
+    """Overrides used when a job is auto-generated from the data directory."""
+    parser.add_argument("--symbol", default="", help="Symbol filter (e.g. BTCUSDT); default: first discovered")
+    parser.add_argument("--resolution", default="", help="Resolution filter (second/minute/hour/daily)")
+    parser.add_argument("--features", default="", help="Comma-separated feature names")
+    parser.add_argument("--interval", type=float, default=None, help="Observation interval in seconds")
+    parser.add_argument("--experiment", default="", help="Experiment name")
+    parser.add_argument("--horizons", default="", help="Comma-separated label horizons (e.g. 00:05:00,00:30:00)")
+
+
+def _auto_job(args: argparse.Namespace, env: dict) -> dict:
+    """Builds a job dict from the data root plus CLI overrides (no job file)."""
+    data_root = args.data_dir or env.get("QUANTLAB_DATA_ROOT") or ""
+    if not data_root:
+        raise ValueError("no data root: pass --data-dir or set QUANTLAB_DATA_ROOT")
+
+    profiles = discover_profiles(data_root)
+    if not profiles:
+        raise ValueError(f"no Lean dataset files (*.zip) found under {data_root}")
+
+    def _match(p) -> bool:
+        return (not args.symbol or p.symbol.lower() == args.symbol.lower()) and (
+            not args.resolution or p.resolution.lower() == args.resolution.lower()
+        )
+
+    candidates = [p for p in profiles if _match(p)]
+    if not candidates:
+        raise ValueError(
+            f"no dataset matches symbol={args.symbol or '*'} resolution={args.resolution or '*'} "
+            f"in {data_root} (found: {[p.label for p in profiles]})"
+        )
+    profile = candidates[0]
+
+    features = [f.strip() for f in args.features.split(",")] if args.features else None
+    horizons = [h.strip() for h in args.horizons.split(",")] if args.horizons else None
+
+    job = build_job(
+        profile,
+        features=features,
+        observation_interval_seconds=args.interval,
+        experiment_name=args.experiment or None,
+        horizons=horizons,
+        output_location=args.output_dir if hasattr(args, "output_dir") else "",
+    )
+    if len(candidates) > 1:
+        print(f"[job create] {len(candidates)} profiles match; using {profile.label}", file=sys.stderr)
+    return job_to_dict(job)
+
+
 def _main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     env_file = args.env_file or str(DEFAULT_ENV)
     try:
         if args.command == "run":
             if args.where == "local":
+                if args.job is None:
+                    job_dict = _auto_job(args, cloud.environment(env_file))
+                    result = cloud.run_local_dict(job_dict, data_dir=args.data_dir, output_dir=args.output_dir, build=args.build)
+                    print(f"exit={result.exit_code}")
+                    print(result.stdout.strip())
+                    if result.stderr.strip():
+                        print(f"[stderr]\n{result.stderr.strip()}", file=sys.stderr)
+                    print(json.dumps(result.manifest, indent=2) if result.manifest else "no manifest")
+                    return 0 if result.exit_code == 0 else 1
                 result = cloud.run_local(args.job, data_dir=args.data_dir, output_dir=args.output_dir, build=args.build)
                 print(f"exit={result.exit_code}")
                 print(result.stdout.strip())
@@ -111,6 +182,16 @@ def _main(argv: list[str] | None = None) -> int:
                     env_file=env_file,
                 )
                 return 0
+
+        elif args.command == "job":
+            job_dict = _auto_job(args, cloud.environment(env_file))
+            text = json.dumps(job_dict, indent=2)
+            if args.out:
+                Path(args.out).write_text(text + "\n", encoding="utf-8")
+                print(f"job written: {args.out}")
+            else:
+                print(text)
+            return 0
 
         elif args.command == "bundle":
             if args.bundle_action == "build":

@@ -349,29 +349,38 @@ def run_local(
     if not job_json.is_file():
         raise FileNotFoundError(f"job file not found: {job_json}")
     payload = json.loads(job_json.read_text(encoding="utf-8"))
+    return run_local_dict(payload, data_dir=data_dir, output_dir=output_dir, build=build)
 
+
+def run_local_dict(
+    payload: Dict[str, object],
+    data_dir: str = "",
+    output_dir: str = "",
+    build: bool = False,
+) -> ResearchResult:
+    """Runs an in-memory job dict through the local Runner DLL (no job file needed)."""
     job = ResearchJob(
-        dataset=payload.get("dataset", ""),
-        symbols=payload.get("symbols", []),
-        asset_class=payload.get("assetClass", "crypto"),
-        venue=payload.get("venue", ""),
-        resolution=payload.get("resolution", "minute"),
-        start_time=payload.get("startTime", ""),
-        end_time=payload.get("endTime", ""),
-        event_types=payload.get("eventTypes", []),
-        observation_interval_seconds=_parse_timespan(payload.get("observationInterval", "00:00:00.100")),
-        features=payload.get("features", []),
-        experiment_name=payload.get("experimentName", ""),
-        experiment_config=payload.get("experimentConfig", {}),
-        horizons=payload.get("horizons", []),
-        output_location=payload.get("outputLocation", ""),
-        output_format=payload.get("outputFormat", "parquet"),
-        engine_version=payload.get("engineVersion", "1.0.0"),
-        max_events=payload.get("maxEvents", 0),
-        enable_checkpointing=payload.get("enableCheckpointing", True),
-        checkpoint_directory=payload.get("checkpointDirectory", ""),
-        reorder=payload.get("reorder", "fullsort"),
-        job_id=payload.get("jobId", ""),
+        dataset=str(payload.get("dataset", "")),
+        symbols=[str(s) for s in payload.get("symbols", [])],
+        asset_class=str(payload.get("assetClass", "crypto")),
+        venue=str(payload.get("venue", "")),
+        resolution=str(payload.get("resolution", "minute")),
+        start_time=str(payload.get("startTime", "")),
+        end_time=str(payload.get("endTime", "")),
+        event_types=[str(e) for e in payload.get("eventTypes", [])],
+        observation_interval_seconds=_parse_timespan(str(payload.get("observationInterval", "00:00:00.100"))),
+        features=[str(f) for f in payload.get("features", [])],
+        experiment_name=str(payload.get("experimentName", "")),
+        experiment_config={str(k): str(v) for k, v in payload.get("experimentConfig", {}).items()},
+        horizons=[str(h) for h in payload.get("horizons", [])],
+        output_location=str(payload.get("outputLocation", "")),
+        output_format=str(payload.get("outputFormat", "parquet")),
+        engine_version=str(payload.get("engineVersion", "1.0.0")),
+        max_events=int(payload.get("maxEvents", 0)),
+        enable_checkpointing=bool(payload.get("enableCheckpointing", True)),
+        checkpoint_directory=str(payload.get("checkpointDirectory", "")),
+        reorder=str(payload.get("reorder", "fullsort")),
+        job_id=str(payload.get("jobId", "")),
     )
     if output_dir:
         job.output_location = output_dir

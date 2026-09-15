@@ -50,15 +50,18 @@ from .cloud import (
     load_environment,
     make_bundle,
     run_local,
+    run_local_dict,
     submit_job,
     upload_bundle,
 )
+from .discover import DatasetProfile, build_job, discover_profiles, job_to_dict
 
 __all__ = [
     "ResearchJob",
     "ResearchResult",
     "run",
     "run_local",
+    "run_local_dict",
     "build_runner",
     "find_runner",
     "submit_job",
@@ -72,4 +75,8 @@ __all__ = [
     "load_environment",
     "find_gcloud",
     "find_gsutil",
+    "DatasetProfile",
+    "discover_profiles",
+    "build_job",
+    "job_to_dict",
 ]

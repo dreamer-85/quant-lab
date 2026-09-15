@@ -139,7 +139,24 @@ the attached service account (no `gcloud auth activate-service-account`).
 
 ## 4. Run a job
 
-Locally (the CLI wraps the underlying `dotnet` invocation):
+The job file is optional — for the common case the CLI infers the whole job
+from the Lean data directory layout (`<root>/<asset>/<venue>/<resolution>/
+<symbol>/<YYYYMMDD>[_<ticktype>].zip`). To see what it would generate:
+
+```bash
+python -m quantlab job create --data-dir <lean-data-root>
+# optional overrides: --symbol BTCUSDT --resolution minute --features a,b
+#                     --interval 30 --experiment name --horizons 00:05:00
+#   -o myjob.json   writes the JSON instead of printing it
+```
+
+To run a job directly from the data (no job JSON, no file upload):
+
+```bash
+python -m quantlab run local --data-dir <lean-data-root>
+```
+
+Or keep using an explicit job file:
 
 ```bash
 python -m quantlab run local deploy/cloud/jobs/bybit-btcusdt-20221213.json --data-dir <lean-data-root>
