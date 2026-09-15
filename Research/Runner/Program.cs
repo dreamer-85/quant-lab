@@ -25,6 +25,19 @@ namespace QuantConnect.Research.Runner
 
         public static int Main(string[] args)
         {
+            // Mode resolution. The same image serves two Cloud Run shapes:
+            //   - service: ENTRYPOINT = [..., "--web"] and no job args  -> web (HTTP) mode
+            //   - job:     ENTRYPOINT = [..., "--web"] plus --job-file/--data-dir/...
+            //              args appended by the job spec               -> CLI (one-shot) mode
+            var hasWebFlag = args.Any(a => a == "--web" || a == "--web-mode");
+            var hasJobArgs = args.Any(a => a.StartsWith("--job-file")
+                || a == "--job-file"
+                || a.StartsWith("--synthetic-benchmark"));
+            if (hasWebFlag && !hasJobArgs)
+            {
+                return WebServer.Run(args.Where(a => a != "--web" && a != "--web-mode").ToArray()).GetAwaiter().GetResult();
+            }
+
             string jobFile = null;
             string dataDir = null;
             string outputDir = null;
@@ -47,6 +60,20 @@ namespace QuantConnect.Research.Runner
                         syntheticBenchmark = long.Parse(args[++i]);
                         break;
                     default:
+                        // The image ENTRYPOINT always passes --web; the CLI path must
+                        // tolerate it (mode is decided above by presence of job args).
+                        if (args[i] == "--web" || args[i] == "--web-mode")
+                        {
+                            break;
+                        }
+                        // Accept the --flag=value form used by Cloud Run job specs.
+                        if (TryParseEquals(args[i], "--job-file=", ref jobFile)
+                            || TryParseEquals(args[i], "--data-dir=", ref dataDir)
+                            || TryParseEquals(args[i], "--output-dir=", ref outputDir)
+                            || TryParseEquals(args[i], "--synthetic-benchmark=", ref syntheticBenchmark))
+                        {
+                            break;
+                        }
                         Console.Error.WriteLine($"Unknown argument: {args[i]}");
                         return 2;
                 }
@@ -71,28 +98,8 @@ namespace QuantConnect.Research.Runner
 
             try
             {
-                var job = JsonSerializer.Deserialize<ResearchJob>(File.ReadAllText(jobFile), JsonOptions);
-                if (job == null)
-                {
-                    Console.Error.WriteLine("Failed to deserialize job");
-                    return 2;
-                }
+                var (result, manifestPath) = ExecuteJobFile(jobFile, dataDir, outputDir);
 
-                var environment = new ResearchEnvironment(dataRoot: dataDir, outputRoot: outputDir);
-                LeanBootstrap.EnsureDataFolder(environment.DataRoot);
-
-                // The job carries only logical content; resolve physical roots here.
-                if (string.IsNullOrWhiteSpace(job.OutputLocation))
-                {
-                    job.OutputLocation = environment.OutputRoot;
-                }
-
-                var executor = new LocalResearchExecutor(
-                    new LeanDataEventSource(new LeanDataEventReader(environment.DataRoot)),
-                    environment: environment);
-                var result = executor.Execute(job);
-
-                var manifestPath = WriteManifest(job, result);
                 Console.WriteLine(result.ToString());
                 foreach (var file in result.OutputFiles)
                 {
@@ -107,6 +114,96 @@ namespace QuantConnect.Research.Runner
                 Console.Error.WriteLine(ex.ToString());
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// Parses a `--flag=value` argument for a CLI switch. Returns true when the
+        /// argument matches the prefix and reports the extracted value.
+        /// </summary>
+        private static bool TryParseEquals(string arg, string prefix, ref string value)
+        {
+            if (!arg.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            value = arg.Substring(prefix.Length);
+            return true;
+        }
+
+        private static bool TryParseEquals(string arg, string prefix, ref long value)
+        {
+            if (!arg.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            value = long.Parse(arg.Substring(prefix.Length));
+            return true;
+        }
+
+        /// <summary>
+        /// Runs a job from a job JSON file and returns the execution result plus the manifest path.
+        /// Shared by the CLI and the web server so both modes produce identical outcomes.
+        /// </summary>
+        public static (LocalExecutionResult Result, string ManifestPath) ExecuteJobFile(
+            string jobFile,
+            string dataDir = null,
+            string outputDir = null)
+        {
+            var job = JsonSerializer.Deserialize<ResearchJob>(File.ReadAllText(jobFile), JsonOptions);
+            if (job == null)
+            {
+                throw new InvalidOperationException("Failed to deserialize job");
+            }
+
+            var environment = new ResearchEnvironment(dataRoot: dataDir, outputRoot: outputDir);
+            LeanBootstrap.EnsureDataFolder(environment.DataRoot);
+
+            // The job carries only logical content; resolve physical roots here.
+            if (string.IsNullOrWhiteSpace(job.OutputLocation))
+            {
+                job.OutputLocation = environment.OutputRoot;
+            }
+
+            var executor = new LocalResearchExecutor(
+                new LeanDataEventSource(new LeanDataEventReader(environment.DataRoot)),
+                environment: environment);
+            var result = executor.Execute(job);
+
+            var manifestPath = WriteManifest(job, result);
+            return (result, manifestPath);
+        }
+
+        /// <summary>
+        /// Runs a job from an in-memory job document and returns the execution result plus the
+        /// manifest path. Errors are reported via the result (job failure) or thrown (bad input)
+        /// so the web server can map them onto HTTP status codes.
+        /// </summary>
+        public static (LocalExecutionResult Result, string ManifestPath) ExecuteJobDocument(
+            string jobJson,
+            string dataDir = null,
+            string outputDir = null)
+        {
+            var job = JsonSerializer.Deserialize<ResearchJob>(jobJson, JsonOptions);
+            if (job == null)
+            {
+                throw new InvalidOperationException("Failed to deserialize job");
+            }
+
+            var environment = new ResearchEnvironment(dataRoot: dataDir, outputRoot: outputDir);
+            LeanBootstrap.EnsureDataFolder(environment.DataRoot);
+
+            if (string.IsNullOrWhiteSpace(job.OutputLocation))
+            {
+                job.OutputLocation = environment.OutputRoot;
+            }
+
+            var executor = new LocalResearchExecutor(
+                new LeanDataEventSource(new LeanDataEventReader(environment.DataRoot)),
+                environment: environment);
+            var result = executor.Execute(job);
+
+            var manifestPath = WriteManifest(job, result);
+            return (result, manifestPath);
         }
 
         /// <summary>

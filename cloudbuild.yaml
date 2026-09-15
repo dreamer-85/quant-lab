@@ -71,6 +71,41 @@ steps:
           gcloud run jobs create $_JOB_NAME "${FLAGS[@]}"
         fi
 
+  # 4. Deploy the image to the Cloud Run Service (web mode).
+  #    The container ENTRYPOINT is `.../QuantConnect.Research.Runner.dll --web`, so the
+  #    service exposes the HTTP API on ${PORT:-8080} and satisfies startup probes.
+  #    Shared image, separate shape: jobs run the CLI (they always pass --job-file),
+  #    the service runs Kestrel (no --job-file -> web server).
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-euc'
+      - |
+        IMAGE="$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$COMMIT_SHA"
+        SA="quantlab-runner@$PROJECT_ID.iam.gserviceaccount.com"
+        SVC="quant-lab"
+        if ! gcloud run services describe $SVC --project=$PROJECT_ID --region=$_REGION >/dev/null 2>&1; then
+          echo "==> Creating Cloud Run Service $SVC"
+          gcloud run deploy $SVC \
+            --image="$$IMAGE" \
+            --project=$PROJECT_ID \
+            --region=$_REGION \
+            --cpu=$_CPU \
+            --memory=$_MEMORY \
+            --port=8080 \
+            --allow-unauthenticated \
+            --service-account="$$SA" \
+            --set-env-vars=QUANTLAB_DATA_ROOT=/quantlab/data,QUANTLAB_OUTPUT_ROOT=/quantlab/output,QUANTLAB_CACHE_ROOT=/quantlab/cache,QUANTLAB_TEMP_ROOT=/tmp \
+            --add-volume name=data,type=cloud-storage,bucket=$_BUCKET,readonly=true \
+            --add-volume-mount volume=data,mount-path=/quantlab/data \
+            --add-volume name=output,type=cloud-storage,bucket=$_BUCKET,readonly=false \
+            --add-volume-mount volume=output,mount-path=/quantlab/output \
+            --quiet
+        else
+          echo "==> Updating Cloud Run Service $SVC (deleting+redeploying to pick up new image)"
+          gcloud run services update $SVC --image="$$IMAGE" --region=$_REGION --quiet
+        fi
+
 images:
   - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:$COMMIT_SHA'
   - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO_NAME/$_IMAGE_NAME:latest'

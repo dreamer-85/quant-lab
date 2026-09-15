@@ -81,6 +81,25 @@ dotnet run --project Research\Runner -- --synthetic-benchmark 1000000
 | `--output-dir <path>`     | Root for results/checkpoints (default: `QUANTLAB_OUTPUT_ROOT` or `%TEMP%\QuantLab`). |
 | `--synthetic-benchmark N` | Run the streaming pipeline over a deterministic synthetic source of N events. |
 
+Run as a Cloud Run **service** (HTTP front end) instead of a one-shot CLI:
+
+```
+dotnet run --project Research\Runner -- --web [--port 8080] [--data-dir] [--output-dir]
+```
+
+| Endpoint       | Description                                                        |
+| -------------- | ------------------------------------------------------------------ |
+| `GET /healthz` | Startup/health probe target (`200 {"status":"ok"}`).               |
+| `GET /`        | Service info JSON (name, mode, port, resolved dirs).               |
+| `POST /run`    | Body = job JSON (same schema as a job file). Executes it and returns JSON with `succeeded`, counts, output files, manifest path. |
+| `POST /run-job-file` | Body = `{ "jobFile": "...", "dataDir": "...", "outputDir": "..." }`. Runs a job already present on disk. |
+
+The same image is used for Cloud Run jobs and services. If `--job-file` (or
+`--synthetic-benchmark`) is present among the arguments the runner ignores
+`--web` and runs the CLI; a service spec (no job args) gets the web server.
+The web server binds `0.0.0.0:${PORT}` (defaults to `--port` then `PORT` env, then 8080),
+which satisfies Cloud Run's startup probe on port 8080.
+
 The job file itself carries only logical content (dataset, symbols, times,
 features, horizons, experiment); physical roots are resolved by the runner/environment.
 Exit code 0 = success, 1 = failed job, 2 = usage error.

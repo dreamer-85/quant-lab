@@ -22,6 +22,11 @@ ENV QUANTLAB_DATA_ROOT=/quantlab/data \
     QUANTLAB_CACHE_ROOT=/quantlab/cache \
     QUANTLAB_TEMP_ROOT=/tmp
 
+# Cloud Run services probe port 8080 by default; EXPOSE documents the intent.
+# The container binds 0.0.0.0:${PORT} in --web mode, so it is reachable from
+# the Cloud Run frontend and satisfies the startup/health probes.
+EXPOSE 8080
+
 # The aspnet base image already pre-configures a 'app' user (UID 1000) —
 # reuse it instead of creating another user.
 RUN mkdir -p /quantlab/data /quantlab/output /quantlab/cache \
@@ -30,4 +35,7 @@ RUN mkdir -p /quantlab/data /quantlab/output /quantlab/cache \
 USER app
 VOLUME ["/quantlab"]
 
-ENTRYPOINT ["dotnet", "QuantConnect.Research.Runner.dll"]
+# Default: Cloud Run SERVICE mode (HTTP server on $PORT). Omit `--web` to run
+# the one-shot CLI as a Cloud Run JOB (the job spec provides --job-file etc.):
+#   gcloud run jobs execute uses the same image with --args=... and no --web.
+ENTRYPOINT ["dotnet", "QuantConnect.Research.Runner.dll", "--web"]

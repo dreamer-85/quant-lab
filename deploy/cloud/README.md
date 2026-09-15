@@ -1,8 +1,9 @@
-# Cloud Deployment (ResearchEngine on GCE)
+# Cloud Deployment (ResearchEngine on GCE / Cloud Run)
 
-Scripts and tooling to provision a Google Compute Engine VM that builds and
-runs the ResearchEngine, stage data via Google Cloud Storage, run jobs on the
-VM or on the workstation, and pull results back to compare locally vs cloud.
+Scripts and tooling to provision Google Compute Engine and Cloud Run resources
+that build and run the ResearchEngine, stage data via Google Cloud Storage, run
+jobs on a VM, on Cloud Run (job or service), or on the workstation, and pull
+results back to compare locally vs cloud.
 
 Everything is driven by **one** environment file — `deploy/cloud/environment`
 (copied from `environment.example`) — which is parsed both by the bash
@@ -144,10 +145,20 @@ quantlab env [--show]
 
 **`Missing --job-file` / `Invalid --job-file: file not found`** (Cloud Run)
 
-The container's ENTRYPOINT is `dotnet QuantConnect.Research.Runner.dll` with no
-arguments — every arg must come from the job's `--args`. The two GCS volumes
-mount the **bucket root** at `/quantlab/data` and `/quantlab/output`, so the
-runner expects `job.json` at `gs://<bucket>/job.json`. The message means one of:
+The container shares one image between two Cloud Run shapes:
+
+- **Cloud Run Job**: the runner is a batch CLI — it reads a job, emits
+  `manifest.json`, and exits. Every arg must come from the job's `--args`
+  (`--job-file=...`). Because the job spec always passes `--job-file`, the
+  runner detects it and runs in CLI mode even though the image ENTRYPOINT is
+  `... --web`.
+- **Cloud Run Service** (web mode): same image, **no** `--job-file` arg, so the
+  runner starts Kestrel on `0.0.0.0:${PORT:-8080}` and serves the HTTP API
+  (`/healthz`, `/`, `/run`, `/run-job-file`). This satisfies the startup probe.
+
+The two GCS volumes mount the **bucket root** at `/quantlab/data` and
+`/quantlab/output`, so the runner expects `job.json` at `gs://<bucket>/job.json`.
+The `Missing --job-file` / `Invalid --job-file` message means one of:
 
 1. **The job has no `--args`.** Verify:
    ```bash
@@ -164,6 +175,17 @@ runner expects `job.json` at `gs://<bucket>/job.json`. The message means one of:
    bash deploy/cloud/stage-bucket.sh --data-root <lean> \
      --job deploy/cloud/jobs/<job>.json --bucket gs://<bucket> --verify
    ```
+
+**`failed to start because the default startup TCP probe on port 8080 was
+unsuccessful`** (Cloud Run Service)
+
+This means the service deployed an image that did not listen on port 8080
+during startup. If it was a pre-web build of the runner (CLI-only, exits after
+the job), Kestrel is never started. Fix: redeploy with the `--web` image (the
+post-`--web` Dockerfile ENTRYPOINT) — either through `cloudbuild.yaml` step 4
+or `gcloud run deploy quant-lab --image=<image> --port=8080 --allow-unauthenticated`.
+The `--web` mode binds `0.0.0.0:$PORT` and serves `/healthz`, so the probe and
+any `/run` requests succeed.
 
 ## Data contract
 
