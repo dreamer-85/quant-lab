@@ -47,4 +47,5 @@ else
 fi
 
 echo "==> Done. Re-login (or source ~/.bashrc) so dotnet/gcloud are on PATH."
-echo "    Then: gcloud auth activate-service-account --key-file=sa-key.json"
+echo "    GCS auth is via the VM's attached service account (no key file needed)."
+echo "    To verify:  gcloud auth list && gsutil ls gs://<QUANTLAB_GCS_BUCKET>/"

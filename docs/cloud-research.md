@@ -47,14 +47,39 @@ shows the underlying primitives.
   `QUANTLAB_VM`, `QUANTLAB_ZONE`, `QUANTLAB_PROJECT`, `QUANTLAB_GCS_BUCKET`.
 - The CLI needs `Research/Python` on `PYTHONPATH` (or `pip install -e Research/Python`, then `quantlab`; install `[deep]` extras for parquet-level `compare --deep`).
 
-## 1. Provision the VM
+## 1. Provision the GCP resources
 
-Create the VM (example sizes for the Bybit BTCUSDT minute dataset — adjust to
-your dataset; `FullSort` materializes events in memory, so size the VM by
-dataset, not by the tiny reference set):
+`deploy/cloud/provision.sh` creates everything idempotently from the single
+`environment` file: the **GCS bucket** (uniform bucket-level access), the
+**IAP-SSH firewall rule** (only `tcp:22` from `35.235.240.0/20`), and the
+**VM** with its attached service account and `storage-rw` scope.
 
 ```bash
-# Debian 12, 4 vCPU / 16 GB, 200 GB SSD (adjust for dataset size)
+# 1a. Fill the environment (project, zone, bucket, SA email, VM geometry)
+cp deploy/cloud/environment.example deploy/cloud/environment   # edit values
+python -m quantlab env --show
+
+# 1b. Provision (bucket + firewall + VM)
+source deploy/cloud/environment && bash deploy/cloud/provision.sh
+```
+
+Networking and ports, by design:
+
+- The VM has **no public IP** (`--no-address`) — SSH happens only through the
+  Identity-Aware Proxy tunnel (`gcloud compute ssh` enables it automatically).
+  Firewall rule `quantlab-allow-iap-ssh` allows `tcp:22` for tagged instances
+  from the IAP range.
+- The Runner is a **batch CLI**: it reads a job, writes results, exits. It owns
+  no listening socket, so no application port is ever opened on the VM.
+- If you cannot use IAP, set `QUANTLAB_VM_EXT_IP="ephemeral"` in the environment;
+  the VM then gets an external IP, but no firewall rule permits inbound traffic
+  to it beyond the IAP-SSH rule.
+
+Manual equivalent (if you provision outside `provision.sh`):
+
+```bash
+# Debian 12, 4 vCPU / 16 GB, 200 GB SSD (adjust for dataset size);
+# FullSort materializes events in memory, so size by dataset not the tiny sample.
 gcloud compute instances create quantlab-vm \
   --project=<PROJECT> \
   --zone=us-central1-a \
@@ -63,17 +88,15 @@ gcloud compute instances create quantlab-vm \
   --image-project=debian-cloud \
   --boot-disk-size=200GB \
   --boot-disk-type=pd-ssd \
-  --service-account=<SA-EMAIL>
+  --no-address \
+  --service-account=<SA-EMAIL> \
+  --scopes=storage-rw \
+  --tags=quantlab-runner
 ```
 
-Or via the console / Terraform — any Debian-based image works. The scripts
-require nothing exotic: apt, curl, `dotnet`, `gsutil`.
-
-Upload the service-account key (for `gsutil`/`gcloud` on the VM):
-
-```bash
-gcloud compute scp sa-key.json quantlab-vm:~/
-```
+With the attached service account scoped to `storage-rw`, `gsutil`/gcloud work
+on the VM with **no key file**. The service-account key JSON is only needed on
+the **workstation** (`GOOGLE_APPLICATION_CREDENTIALS`).
 
 ## 2. Stage the dataset bundle
 
@@ -100,20 +123,19 @@ re-checks them after extraction.
 ## 3. Bootstrap the VM
 
 ```bash
-gcloud compute ssh quantlab-vm
+gcloud compute ssh quantlab-vm     # IAP tunnel; no key upload needed
 git clone https://github.com/boo100-hub/myEngine.git
 cd myEngine/deploy/cloud
-cp environment.example environment     # edit: repo URL, GCS bucket, SA key path
+cp environment.example environment     # edit: repo URL, GCS bucket/prefix
 source environment
 
-gcloud auth activate-service-account --key-file=<path-to-sa-key>.json
-gcloud config set project <PROJECT>
 ./setup-vm.sh                          # installs .NET/gcloud, clone, build, 64 tests
 ./stage-data.sh bybit-btcusdt-20221213.tar.gz --verify
 ```
 
 `setup-vm.sh` is idempotent: it refreshes the clone, rebuilds, re-runs the
-engine test suite, and smoke-tests the Runner binary.
+engine test suite, and smoke-tests the Runner binary. GCS access on the VM uses
+the attached service account (no `gcloud auth activate-service-account`).
 
 ## 4. Run a job
 

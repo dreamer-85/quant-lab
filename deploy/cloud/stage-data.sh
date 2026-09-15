@@ -4,10 +4,13 @@
 # data folder on the VM ($QUANTLAB_DATA_ROOT).
 #
 # The bundle is a tar.gz produced locally with:
-#   tar -czf bybit-btcusdt-20221213.tar.gz -C <data-root> \
-#       market-hours symbol-properties crypto
+#   python -m quantlab bundle build --data-root <lean-data> --out bybit.tgz
 #
-# Expects: gsutil configured + QUANTLAB_GCS_BUCKET / QUANTLAB_GCS_PREFIX set.
+# GCS object: gs://<QUANTLAB_GCS_BUCKET>/<QUANTLAB_GCS_PREFIX>/<bundle>.
+# Auth: on the VM the attached service account + storage-rw scope are used
+# (no key file needed); on a workstation gsutil uses the gcloud user account.
+#
+# No ports are involved - this only reads from GCS over IAP-free service auth.
 # Usage: source environment && ./stage-data.sh <bundle-object> [--verify]
 set -euo pipefail
 
@@ -26,6 +29,10 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 umask 022
+
+if [ -n "${QUANTLAB_PROJECT:-}" ]; then
+    gcloud config set project "${QUANTLAB_PROJECT}" >/dev/null 2>&1 || true
+fi
 
 echo "==> Creating data root ${DATA_ROOT}"
 sudo mkdir -p "${DATA_ROOT}"

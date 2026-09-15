@@ -13,7 +13,8 @@ deploy scripts (`source environment`) and by the Python CLI
 
 | File | Purpose |
 |------|---------|
-| `environment.example` | Env-template; copy to `environment`, fill in, never commit |
+| `environment.example` | GCP env-template; copy to `environment`, fill in, never commit |
+| `provision.sh` | **Provision GCP resources idempotently**: GCS bucket, IAP-SSH firewall rule, VM (attached SA + storage scope) |
 | `install-dependencies.sh` | Install .NET SDK + git + gcloud/gsutil on Debian/Ubuntu (VM) |
 | `install-gcloud-windows.ps1` | Install Google Cloud SDK on the Windows workstation |
 | `setup-vm.sh` | One-time VM bootstrap: clone, build, run test suite, smoke test |
@@ -26,29 +27,57 @@ Plus the unified Python client in `Research/Python/quantlab/`, whose CLI
 (`python -m quantlab`) wraps these scripts so the same job runs identically
 locally or on the VM (see *Unified CLI* below).
 
+## Google Cloud architecture
+
+```
+[Workstation]                         [Google Cloud]
+  quantlab CLI ──gcloud/gsutil──►     GCS bucket  gs://<bucket>/<prefix>/
+  (your laptop, no ports)                 │  {bundles/ , output/}
+                                    [GCE VM] quantlab-vm (Debian 12, no public IP)
+                                         │  SSH via IAP tunnel (tcp:22 from 35.235.240.0/20)
+  gcloud compute ssh ──IAP tunnel──►     │  -> runs run-job.sh (batch CLI, no listening port)
+```
+
+- **No application port on the VM.** The runner is a batch CLI it reads a job,
+  emits `manifest.json`, and exits — it owns no listening socket, so no HTTP/grpc
+  firewall rule exists.
+- **SSH only, and only through IAP.** `provision.sh` creates the firewall rule
+  `quantlab-allow-iap-ssh` allowing `tcp:22` from the IAP range
+  `35.235.240.0/20` against VM tag `${QUANTLAB_VM_TAGS}`. The VM is created with
+  `--no-address` (no public IP) unless `QUANTLAB_VM_EXT_IP=ephemeral`.
+  `gcloud compute ssh` and `quantlab run cloud` automatically use the IAP tunnel.
+- **Keyless GCS on the VM.** The VM is created with an attached service account
+  (`QUANTLAB_SA_EMAIL`) and `--scopes=storage-rw`, so `gsutil`/gcloud work
+  without any key file on the instance. Set
+  `GOOGLE_APPLICATION_CREDENTIALS` only on the **workstation**, pointing at a
+  service-account key JSON.
+
 ## Quick start (local laptop → cloud VM)
 
 ```bash
 # 1. On Windows: install the Google Cloud SDK once
 powershell -ExecutionPolicy Bypass -File deploy\cloud\install-gcloud-windows.ps1
 
-# 2. Configure the single environment file
+# 2. Configure the single environment file (project, zone, bucket, SA email, VM)
 cp deploy/cloud/environment.example deploy/cloud/environment   # edit values
 python -m quantlab env --show                                   # verify
 
-# 3. Build a dataset bundle from a Lean data root and upload it
+# 3. Provision GCP resources (bucket, IAP-SSH firewall, VM) idempotently
+source deploy/cloud/environment && bash deploy/cloud/provision.sh
+
+# 4. Build a dataset bundle from a Lean data root and upload it
 python -m quantlab bundle build --data-root <lean-data> --out data/bybit.tgz
 python -m quantlab bundle upload data/bybit.tgz
 
-# 4. Run the same job locally
+# 5. Run the same job locally
 python -m quantlab run local  deploy/cloud/jobs/bybit-btcusdt-20221213.json \
     --data-dir <lean-data>
 
-# 5. Provision the VM (after it exists), stage data, run there
+# 6. Bootstrap the VM, stage data, run there
 gcloud compute ssh quantlab-vm --command "cd ~/myEngine && ./deploy/cloud/setup-vm.sh"
 python -m quantlab run cloud deploy/cloud/jobs/bybit-btcusdt-20221213.json
 
-# 6. Pull cloud results and compare against the local run
+# 7. Pull cloud results and compare against the local run
 python -m quantlab results download bybit-btcusdt-20221213 --dest out/
 python -m quantlab compare out-local/ out-cloud/
 ```
@@ -73,16 +102,20 @@ identical for both sides:
 
 | Variable | Meaning |
 |----------|---------|
+| `QUANTLAB_PROJECT` / `QUANTLAB_ZONE` | GCP project id + VM zone (`provision.sh`, `run cloud`) |
+| `QUANTLAB_REGION` | Region for the bucket (default: zone's region) |
+| `QUANTLAB_VM` | GCE instance name used by `run cloud` (default `quantlab-vm`) |
+| `QUANTLAB_GCS_BUCKET` | **Bucket name only** (no `gs://`); stores `bundles/` + `output/` |
+| `QUANTLAB_GCS_PREFIX` | Subfolder inside the bucket (default `quantlab`) |
+| `QUANTLAB_SA_EMAIL` | Service-account email attached to the VM (keyless gsutil) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | **Workstation only**: path to the SA key JSON |
+| `QUANTLAB_VM_TAGS` / `QUANTLAB_VM_EXT_IP` | Firewall tag for IAP-SSH; `none`\`ephemeral` public IP |
+| `QUANTLAB_VM_MACHINE_TYPE`/`BOOT_*` | VM geometry used by `provision.sh` |
+| `QUANTLAB_REPO_DIR` | Path of the repo on the VM (default `myEngine`) |
 | `QUANTLAB_DATA_ROOT` | Lean-compatible data root on the VM |
 | `QUANTLAB_OUTPUT_ROOT` | Output root (results + `manifest.json`) |
 | `QUANTLAB_CACHE_ROOT` | Scratch/cache (FullSort materializes here) |
 | `QUANTLAB_TEMP_ROOT` | Temp root |
-| `QUANTLAB_GCS_BUCKET` | `gs://bucket/prefix` receiving data bundles and results |
-| `QUANTLAB_GCS_PREFIX` | Subfolder inside the bucket (default `quantlab`) |
-| `QUANTLAB_VM` | GCE instance name used by `run cloud` (default `quantlab-vm`) |
-| `QUANTLAB_ZONE` / `QUANTLAB_PROJECT` | gcloud zone/project for the VM |
-| `QUANTLAB_REPO_DIR` | Path of the repo on the VM (default `myEngine`) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | VM path to the service-account key JSON |
 
 ## Unified CLI (`python -m quantlab`)
 

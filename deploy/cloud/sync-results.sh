@@ -3,6 +3,9 @@
 # Uploads the VM output root (or a single jobId) to GCS, and optionally pulls
 # a job's results back down to a local directory.
 #
+# GCS object root: gs://<QUANTLAB_GCS_BUCKET>/<QUANTLAB_GCS_PREFIX>/output
+# Auth: attached service account (VM) / gcloud user account (workstation).
+#
 # Upload:  source environment && ./sync-results.sh --up [jobId]
 # Download (run on the workstation):
 #         source environment && ./sync-results.sh --down <jobId> <local-dir>
@@ -17,6 +20,10 @@ MODE="${1:?usage: sync-results.sh (--up|--down) [args]}"
 GCS_BUCKET="${QUANTLAB_GCS_BUCKET:?QUANTLAB_GCS_BUCKET must be set}"
 GCS_PREFIX="${QUANTLAB_GCS_PREFIX:-quantlab}"
 BUCKET_PATH="gs://${GCS_BUCKET#gs://}/${GCS_PREFIX}/output"
+
+if [ -n "${QUANTLAB_PROJECT:-}" ]; then
+    gcloud config set project "${QUANTLAB_PROJECT}" >/dev/null 2>&1 || true
+fi
 
 case "${MODE}" in
     --up)

@@ -114,12 +114,16 @@ def environment(
     return merged
 
 
+def _bucket_root(env: Dict[str, str]) -> str:
+    """Normalizes QUANTLAB_GCS_BUCKET (accepts 'my-bucket' or 'gs://my-bucket/') to 'gs://my-bucket'."""
+    bucket = env["QUANTLAB_GCS_BUCKET"].rstrip("/")
+    return bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+
+
 def _bucket_path(object_name: str, env: Dict[str, str]) -> str:
     """Full gs:// path for an object under bucket/prefix."""
-    bucket = env["QUANTLAB_GCS_BUCKET"]
-    prefix = env.get("QUANTLAB_GCS_PREFIX", "quantlab")
-    cleaned = bucket if bucket.endswith("/") else bucket + "/"
-    return f"{cleaned}{prefix}/{object_name}"
+    prefix = env.get("QUANTLAB_GCS_PREFIX", "quantlab").strip("/")
+    return f"{_bucket_root(env)}/{prefix}/{object_name.lstrip('/')}"
 
 
 _REQUIRED_DB_FILES = (
@@ -244,8 +248,8 @@ def list_remote(env: Optional[Dict[str, str]] = None, check: bool = True) -> Lis
     binary = find_gsutil()
     if not binary:
         raise RuntimeError("gsutil not found")
-    prefix = env["QUANTLAB_GCS_BUCKET"].rstrip("/") + "/" + env.get("QUANTLAB_GCS_PREFIX", "quantlab")
-    proc = run(binary, ["ls", f"gs://{prefix.replace('gs://', '')}/"], check=check, capture_output=True, text=True)
+    prefix = _bucket_root(env) + "/" + env.get("QUANTLAB_GCS_PREFIX", "quantlab")
+    proc = run(binary, ["ls", f"{prefix}/"], check=check, capture_output=True, text=True)
     return proc.stdout.strip().splitlines()
 
 

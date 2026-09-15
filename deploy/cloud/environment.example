@@ -1,6 +1,62 @@
 # ResearchEngine cloud deployment environment.
-# Copy to `environment` (git-ignored) and fill in. Sourced by the deploy scripts.
-# Never commit this file.
+# Copy to `environment` (git-ignored) and fill in. Sourced by the deploy scripts
+# AND parsed by the Python CLI (`python -m quantlab env`). Never commit this file.
+#
+# GCP layout produced by deploy/cloud/provision.sh:
+#   - GCS bucket  : gs://<QUANTLAB_GCS_BUCKET>/     (uniform bucket-level access)
+#   - VM          : <QUANTLAB_VM> in <QUANTLAB_PROJECT>/<QUANTLAB_ZONE>
+#   - Network     : <QUANTLAB_VM_NETWORK>/<QUANTLAB_VM_SUBNET>
+#   - SSH         : IAP tunnel (tcp:22 via 35.235.240.0/20) - no external SSH
+#   - App ports   : none. The runner is a batch CLI; it owns no listening port.
+
+# --- GCP identity -----------------------------------------------------------
+# Google Cloud project id, VM zone and region.
+export QUANTLAB_PROJECT=""
+export QUANTLAB_ZONE="us-central1-a"
+export QUANTLAB_REGION="us-central1"
+# Compute Engine instance name used by `python -m quantlab run cloud`.
+export QUANTLAB_VM="quantlab-vm"
+
+# --- Google Cloud Storage -----------------------------------------------------
+# Bucket name ONLY (no gs:// prefix, no folders). The scripts push to
+# gs://<bucket>/<prefix>/{bundles,output}/... created on demand.
+export QUANTLAB_GCS_BUCKET="my-quantlab-bucket"
+# Prefix (subfolder) inside the bucket for this project's data.
+export QUANTLAB_GCS_PREFIX="quantlab"
+
+# --- Credentials ---------------------------------------------------------------
+# Workstation: Service-account key JSON used by gsutil/gcloud on your laptop.
+#   gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
+# VM: leave blank - the VM uses its own attached service account + storage scopes
+# (see QUANTLAB_SA_EMAIL) so gsutil works with NO key file on the instance.
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/sa-key.json"
+# Service account EMAIL attached to the VM (provision.sh). Needs roles:
+#   storage.objectAdmin (GCS), compute.viewer. Logging disabled => not needed.
+export QUANTLAB_SA_EMAIL="quantlab-sa@${QUANTLAB_PROJECT}.iam.gserviceaccount.com"
+
+# --- Networking / ports ---------------------------------------------------------
+# VPC network and subnetwork for the VM (default network is fine).
+export QUANTLAB_VM_NETWORK="default"
+export QUANTLAB_VM_SUBNET="default"
+# Firewall tag applied to the VM. provision.sh opens ONLY:
+#   tcp:22 from 35.235.240.0/20 (IAP) - enables `gcloud compute ssh` w/o a public IP
+#   (optional) tcp:22 from QUANTLAB_ADMIN_IP when IAP is unavailable.
+# The engine is a batch CLI - no other port is ever opened.
+export QUANTLAB_VM_TAGS="quantlab-runner"
+# External (public) address: "none" for IAP-only (recommended, default network
+# has no firewall for inbound), or "ephemeral" to attach an ephemeral IP.
+# An ephemeral IP alone does NOT open any port; firewalling is separate.
+export QUANTLAB_VM_EXT_IP="none"
+# Optional: your home/public IP (CIDR) allowed ad-hoc SSH when IAP is not used.
+export QUANTLAB_ADMIN_IP=""
+
+# --- VM geometry (used by provision.sh) ------------------------------------------
+export QUANTLAB_VM_MACHINE_TYPE="e2-standard-4"
+export QUANTLAB_VM_IMAGE_FAMILY="debian-12"
+export QUANTLAB_VM_IMAGE_PROJECT="debian-cloud"
+export QUANTLAB_VM_BOOT_DISK_SIZE_GB="200"
+export QUANTLAB_VM_BOOT_DISK_TYPE="pd-ssd"
+export QUANTLAB_VM_SERVICE_ACCOUNT_SCOPES="storage-rw"
 
 # --- Repository -----------------------------------------------------------
 # Public or private repo URL used by setup-vm.sh. Use the https:// form so the
@@ -8,15 +64,8 @@
 export QUANTLAB_REPO_URL="https://github.com/boo100-hub/myEngine.git"
 # Optional: personal access token for a private repo. NEVER commit this value.
 export GIT_PAT=""
-
-# --- Google Cloud Storage ---------------------------------------------------
-# Bucket holding the dataset bundle and receiving job results.
-export QUANTLAB_GCS_BUCKET="gs://your-bucket/organize-with-prefixes"
-# Prefix (subfolder) inside the bucket for this project's data.
-export QUANTLAB_GCS_PREFIX="quantlab"
-# Service account key (path on the VM) used to authenticate gsutil/gcloud.
-# Generated at: IAM & Admin > Service Accounts > Keys > Add Key (JSON).
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/sa-key.json"
+# Path/name of the cloned repo on the VM (default: myEngine).
+export QUANTLAB_REPO_DIR="myEngine"
 
 # --- Runtime roots (consumed by the engine via ResearchEnvironment) ----------
 # Lean-compatible data root on the VM. Engine reads market-hours/, symbol-properties/
@@ -29,17 +78,5 @@ export QUANTLAB_CACHE_ROOT="/opt/quantlab/cache"
 # Temp root.
 export QUANTLAB_TEMP_ROOT="/tmp"
 
-# --- VM / GCP (used by the Python CLI and gcloud commands) --------------------
-# Compute Engine instance name, zone and project. The CLI submits jobs with
-#   python -m quantlab run cloud jobs/<job>.json
-export QUANTLAB_VM="quantlab-vm"
-export QUANTLAB_ZONE="us-central1-a"
-export QUANTLAB_PROJECT=""
-# Path/name of the cloned repo on the VM (default: myEngine).
-export QUANTLAB_REPO_DIR="myEngine"
-
 # --- .NET ---------------------------------------------------------------------
 export DOTNET_VERSION="10.0"
-
-# --- VM geometry (used only by provision documentation, not the scripts) ------
-# e2-standard-4 (4 vCPU/16 GB) on Debian 12, 200 GB pd-ssd, Debian-based image.
