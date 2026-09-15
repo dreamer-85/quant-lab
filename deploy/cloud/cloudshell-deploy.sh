@@ -77,6 +77,29 @@ else
   gcloud run jobs create "${JOB_NAME}" "${FLAGS[@]}"
 fi
 
+# --- 3. Preflight: confirm the runner will actually find job.json ------------------
+# The two GCS volumes mount the BUCKET ROOT at /quantlab/data and /quantlab/output,
+# so job.json must sit at the bucket root (NOT under any prefix).
+echo ""
+echo "==> Preflight checks"
+ARGS="$(gcloud run jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" --region="${REGION}" \
+  --format='value(spec.template.spec.template.spec.containers[0].args)' 2>/dev/null | tr ',' ' ')"
+echo "    job args : ${ARGS:-<none!>}"
+if ! echo "${ARGS}" | grep -q -- "--job-file="; then
+  echo "    WARNING : job has no --job-file arg -> the runner will report"
+  echo "              'Missing --job-file'. Re-run this script after da01cb5-era"
+  echo "              args were added; else the container starts with no args."
+fi
+if gsutil ls "gs://${GCS_BUCKET}/job.json" >/dev/null 2>&1; then
+  echo "    bucket   : gs://${GCS_BUCKET}/job.json present (OK)"
+else
+  echo "    WARNING : gs://${GCS_BUCKET}/job.json NOT FOUND at the bucket root."
+  echo "              The bucket root is mounted at /quantlab/data, so the runner"
+  echo "              will fail with 'Invalid --job-file: file not found'."
+  echo "              Fix : bash deploy/cloud/stage-bucket.sh --data-root <lean>"
+  echo "                      --job deploy/cloud/jobs/<job>.json --bucket gs://${GCS_BUCKET}"
+fi
+
 echo ""
 echo "==> Deployed. Job: ${JOB_NAME}  Image: ${IMAGE}"
 echo "    Volumes:  ${GCS_BUCKET} (RO) -> ${DATA_ROOT}   (RW) -> ${OUTPUT_ROOT}"

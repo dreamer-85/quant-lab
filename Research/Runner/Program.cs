@@ -58,9 +58,14 @@ namespace QuantConnect.Research.Runner
                 return RunSyntheticBenchmark(syntheticBenchmark, dataDir, outputDir);
             }
 
-            if (string.IsNullOrEmpty(jobFile) || !File.Exists(jobFile))
+            if (string.IsNullOrEmpty(jobFile))
             {
-                Console.Error.WriteLine("Missing or invalid --job-file <path.json>");
+                Console.Error.WriteLine("Missing --job-file <path.json>");
+                return 2;
+            }
+            if (!File.Exists(jobFile))
+            {
+                Console.Error.WriteLine($"Invalid --job-file: file not found: {jobFile}");
                 return 2;
             }
 

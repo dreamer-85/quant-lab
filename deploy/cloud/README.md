@@ -140,6 +140,31 @@ quantlab env [--show]
   with `--deep`) and field-by-field compares `manifest.json`. Exit code 0
   means identical.
 
+## Troubleshooting
+
+**`Missing --job-file` / `Invalid --job-file: file not found`** (Cloud Run)
+
+The container's ENTRYPOINT is `dotnet QuantConnect.Research.Runner.dll` with no
+arguments — every arg must come from the job's `--args`. The two GCS volumes
+mount the **bucket root** at `/quantlab/data` and `/quantlab/output`, so the
+runner expects `job.json` at `gs://<bucket>/job.json`. The message means one of:
+
+1. **The job has no `--args`.** Verify:
+   ```bash
+   gcloud run jobs describe quant-lab --region=<region> \
+     --format='value(spec.template.spec.template.spec.containers[0].args)'
+   ```
+   If empty, the job was created before args existed — re-run `cloudshell-deploy.sh`.
+2. **`job.json` isn't at the bucket root.** Verify:
+   ```bash
+   gsutil ls gs://<bucket>/job.json
+   ```
+   If absent, stage it (must be the bucket ROOT, not a prefix):
+   ```bash
+   bash deploy/cloud/stage-bucket.sh --data-root <lean> \
+     --job deploy/cloud/jobs/<job>.json --bucket gs://<bucket> --verify
+   ```
+
 ## Data contract
 
 The engine reads **Lean zip files** from `$QUANTLAB_DATA_ROOT`. A bundle must
