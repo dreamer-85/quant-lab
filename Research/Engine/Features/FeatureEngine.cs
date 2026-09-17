@@ -31,11 +31,20 @@ namespace QuantConnect.Research.Engine.Features
         }
 
         /// <summary>
-        /// Creates a FeatureEngine from feature names using the registry
+        /// Creates a FeatureEngine from feature names using the registry, with optional per-feature parameters
         /// </summary>
         public static FeatureEngine FromNames(IEnumerable<string> featureNames, int maxHistory = 1000)
         {
-            var features = FeatureRegistry.Instance.CreateMany(featureNames);
+            return FromNames(featureNames, parameters: null, maxHistory: maxHistory);
+        }
+
+        /// <summary>
+        /// Creates a FeatureEngine from feature names using the registry, applying per-feature parameters
+        /// from job configuration
+        /// </summary>
+        public static FeatureEngine FromNames(IEnumerable<string> featureNames, FeatureParameters parameters, int maxHistory = 1000)
+        {
+            var features = FeatureRegistry.Instance.CreateMany(featureNames, parameters);
             return new FeatureEngine(features, maxHistory);
         }
 

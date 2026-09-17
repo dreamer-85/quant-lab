@@ -86,4 +86,89 @@ namespace QuantConnect.Research.Engine.Features
             return observation.Volume;
         }
     }
+
+    /// <summary>
+    /// Aggressive buy volume feature. Notional (price * quantity) of trades where the taker
+    /// crossed the spread to buy, in the current observation period.
+    /// </summary>
+    public class AggressiveBuyVolumeFeature : FeatureBase
+    {
+        public override string Name => "aggressive_buy_volume";
+        public override string Description => "Taker buy notional in observation period";
+
+        public override decimal Compute(Observation observation, FeatureContext context)
+        {
+            decimal notional = 0m;
+            if (observation.Events == null)
+                return notional;
+
+            foreach (var evt in observation.Events)
+            {
+                if (evt is TradeEvent trade && trade.Side == TradeSide.Buy)
+                    notional += trade.Price * trade.Quantity;
+            }
+
+            return notional;
+        }
+    }
+
+    /// <summary>
+    /// Aggressive sell volume feature. Notional (price * quantity) of trades where the taker
+    /// crossed the spread to sell, in the current observation period.
+    /// </summary>
+    public class AggressiveSellVolumeFeature : FeatureBase
+    {
+        public override string Name => "aggressive_sell_volume";
+        public override string Description => "Taker sell notional in observation period";
+
+        public override decimal Compute(Observation observation, FeatureContext context)
+        {
+            decimal notional = 0m;
+            if (observation.Events == null)
+                return notional;
+
+            foreach (var evt in observation.Events)
+            {
+                if (evt is TradeEvent trade && trade.Side == TradeSide.Sell)
+                    notional += trade.Price * trade.Quantity;
+            }
+
+            return notional;
+        }
+    }
+
+    /// <summary>
+    /// Net aggressive flow feature. Aggressive buy notional minus aggressive sell notional in the
+    /// current observation period. Positive = net buying pressure.
+    /// </summary>
+    public class NetFlowFeature : FeatureBase
+    {
+        public override string Name => "net_flow";
+        public override string Description => "Taker buy notional minus taker sell notional";
+
+        public override decimal Compute(Observation observation, FeatureContext context)
+        {
+            decimal net = 0m;
+            if (observation.Events == null)
+                return net;
+
+            foreach (var evt in observation.Events)
+            {
+                if (evt is not TradeEvent trade)
+                    continue;
+
+                switch (trade.Side)
+                {
+                    case TradeSide.Buy:
+                        net += trade.Price * trade.Quantity;
+                        break;
+                    case TradeSide.Sell:
+                        net -= trade.Price * trade.Quantity;
+                        break;
+                }
+            }
+
+            return net;
+        }
+    }
 }

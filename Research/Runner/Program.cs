@@ -3,6 +3,8 @@ using System.Text.Json.Serialization;
 using QuantConnect.Research.Engine;
 using QuantConnect.Research.Engine.Events;
 using QuantConnect.Research.Engine.Execution;
+using QuantConnect.Research.Engine.Experiments;
+using QuantConnect.Research.Engine.Ingest;
 using QuantConnect.Research.Engine.Jobs;
 using QuantConnect.Research.Engine.LocalData;
 
@@ -165,8 +167,9 @@ namespace QuantConnect.Research.Runner
             }
 
             var executor = new LocalResearchExecutor(
-                new LeanDataEventSource(new LeanDataEventReader(environment.DataRoot)),
-                environment: environment);
+                DataSourceFactory.Create(job, environment),
+                environment: environment,
+                experimentFactory: ExperimentFactory.Create);
             var result = executor.Execute(job);
 
             var manifestPath = WriteManifest(job, result);
@@ -198,8 +201,9 @@ namespace QuantConnect.Research.Runner
             }
 
             var executor = new LocalResearchExecutor(
-                new LeanDataEventSource(new LeanDataEventReader(environment.DataRoot)),
-                environment: environment);
+                DataSourceFactory.Create(job, environment),
+                environment: environment,
+                experimentFactory: ExperimentFactory.Create);
             var result = executor.Execute(job);
 
             var manifestPath = WriteManifest(job, result);

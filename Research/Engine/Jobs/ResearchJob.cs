@@ -1,6 +1,7 @@
 ﻿using QuantConnect.Research.Engine.Events;
 using QuantConnect.Research.Engine.Features;
 using QuantConnect.Research.Engine.Experiments;
+using QuantConnect.Research.Engine.Ingest;
 
 namespace QuantConnect.Research.Engine.Jobs
 {
@@ -27,11 +28,25 @@ namespace QuantConnect.Research.Engine.Jobs
         public List<string> Horizons { get; set; } = new();
         public string OutputLocation { get; set; } = string.Empty;
         public string OutputFormat { get; set; } = "parquet";
+
+        /// <summary>
+        /// Explicit raw observation field names to append as columns on every observation output row.
+        /// Unlike features (which produce decimal values via the feature engine), raw fields read
+        /// directly from the observation state and can be of mixed types (decimal, long, DateTime, string).
+        /// </summary>
+        public List<string> RawFields { get; set; } = new();
         public string EngineVersion { get; set; } = "1.0.0";
         public long MaxEvents { get; set; } = 0;
         public bool EnableCheckpointing { get; set; } = true;
         public string CheckpointDirectory { get; set; } = string.Empty;
         public Replay.ReorderMode Reorder { get; set; } = Replay.ReorderMode.FullSort;
+
+        /// <summary>
+        /// Data-source configuration. When null or "mode":"file" the job reads the Lean zip layout.
+        /// Set mode to "historical" to pull live from an exchange REST API, or "live" to subscribe
+        /// to a WebSocket feed. The <see cref="ExchangeDataAdapter"/> implements both paths.
+        /// </summary>
+        public JobDataSource Source { get; set; }
 
         /// <summary>
         /// Creates the replay configuration from this job
@@ -91,8 +106,19 @@ namespace QuantConnect.Research.Engine.Jobs
                 string.Join(",", Features),
                 ExperimentName,
                 string.Join(",", Horizons),
+                string.Join(",", RawFields),
                 EngineVersion,
-                Reorder.ToString()
+                Reorder.ToString(),
+                Source == null
+                    ? string.Empty
+                    : string.Join("|",
+                        Source.Mode,
+                        Source.Provider,
+                        Source.Category,
+                        Source.OrderBookDepth,
+                        Source.PageSize,
+                        Source.LiveDurationSeconds,
+                        Source.ArchiveFilePath)
             };
 
             var combined = string.Join("|", components);
@@ -123,6 +149,9 @@ namespace QuantConnect.Research.Engine.Jobs
 
             if (string.IsNullOrEmpty(ExperimentName))
                 errors.Add("Experiment name is required");
+
+            if (Source != null && !Source.Validate(out var sourceError))
+                errors.Add($"Invalid source: {sourceError}");
 
             return errors.Count == 0;
         }

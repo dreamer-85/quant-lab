@@ -14,6 +14,7 @@ namespace QuantConnect.Research.Engine.Features
         public static FeatureRegistry Instance => _instance.Value;
 
         private readonly Dictionary<string, Func<IFeature>> _registrations;
+        private readonly Dictionary<string, Func<FeatureParams, IFeature>> _parameterizedRegistrations;
         private readonly object _lock = new();
 
         /// <summary>
@@ -22,6 +23,7 @@ namespace QuantConnect.Research.Engine.Features
         public FeatureRegistry()
         {
             _registrations = new Dictionary<string, Func<IFeature>>(StringComparer.OrdinalIgnoreCase);
+            _parameterizedRegistrations = new Dictionary<string, Func<FeatureParams, IFeature>>(StringComparer.OrdinalIgnoreCase);
             RegisterDefaultFeatures();
         }
 
@@ -37,6 +39,19 @@ namespace QuantConnect.Research.Engine.Features
         }
 
         /// <summary>
+        /// Registers a parameterized feature factory. The factory receives a <see cref="FeatureParams"/>
+        /// bag (parsed from "feature.&lt;name&gt;.&lt;param&gt;" job configuration keys) and returns an
+        /// instance with those parameters applied.
+        /// </summary>
+        public void RegisterParameterized(string name, Func<FeatureParams, IFeature> factory)
+        {
+            lock (_lock)
+            {
+                _parameterizedRegistrations[name] = factory;
+            }
+        }
+
+        /// <summary>
         /// Registers multiple features
         /// </summary>
         public void Register(params IFeature[] features)
@@ -48,12 +63,25 @@ namespace QuantConnect.Research.Engine.Features
         }
 
         /// <summary>
-        /// Creates a feature by name
+        /// Creates a feature by name with default parameters
         /// </summary>
         public IFeature Create(string name)
         {
+            return Create(name, FeatureParams.Empty);
+        }
+
+        /// <summary>
+        /// Creates a feature by name, applying the given parameter set for parameterized features
+        /// </summary>
+        public IFeature Create(string name, FeatureParams parameters)
+        {
             lock (_lock)
             {
+                if (_parameterizedRegistrations.TryGetValue(name, out var parameterized))
+                {
+                    return parameterized(parameters ?? FeatureParams.Empty);
+                }
+
                 if (_registrations.TryGetValue(name, out var factory))
                 {
                     return factory();
@@ -68,10 +96,18 @@ namespace QuantConnect.Research.Engine.Features
         /// </summary>
         public List<IFeature> CreateMany(IEnumerable<string> names)
         {
+            return CreateMany(names, null);
+        }
+
+        /// <summary>
+        /// Creates multiple features by name, applying per-feature parameters resolved from job config
+        /// </summary>
+        public List<IFeature> CreateMany(IEnumerable<string> names, FeatureParameters parameters)
+        {
             var features = new List<IFeature>();
             foreach (var name in names)
             {
-                features.Add(Create(name));
+                features.Add(Create(name, parameters?.For(name)));
             }
             return features;
         }
@@ -83,7 +119,7 @@ namespace QuantConnect.Research.Engine.Features
         {
             lock (_lock)
             {
-                return _registrations.ContainsKey(name);
+                return _registrations.ContainsKey(name) || _parameterizedRegistrations.ContainsKey(name);
             }
         }
 
@@ -94,7 +130,11 @@ namespace QuantConnect.Research.Engine.Features
         {
             lock (_lock)
             {
-                return _registrations.Keys.OrderBy(k => k).ToList();
+                return _registrations.Keys
+                    .Concat(_parameterizedRegistrations.Keys)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
             }
         }
 
@@ -118,9 +158,16 @@ namespace QuantConnect.Research.Engine.Features
             Register("liquidity_wall", () => new LiquidityWallFeature());
             Register("resistance", () => new ResistanceFeature());
             Register("structural_imbalance", () => new StructuralImbalanceFeature());
-            Register("liquidity_depletion", () => new LiquidityDepletionFeature());
-            Register("replenishment_rate", () => new LiquidityReplenishmentRateFeature());
-            Register("depth_persistence", () => new DepthPersistenceFeature());
+            Register("aggressive_buy_volume", () => new AggressiveBuyVolumeFeature());
+            Register("aggressive_sell_volume", () => new AggressiveSellVolumeFeature());
+            Register("net_flow", () => new NetFlowFeature());
+
+            RegisterParameterized("liquidity_depletion", p =>
+                new LiquidityDepletionFeature(p.GetInt("lookback_periods", 5), p.GetDecimal("bps_band", 10m)));
+            RegisterParameterized("replenishment_rate", p =>
+                new LiquidityReplenishmentRateFeature(p.GetInt("window_size", 10), p.GetDecimal("bps_band", 10m)));
+            RegisterParameterized("depth_persistence", p =>
+                new DepthPersistenceFeature(p.GetInt("window_size", 20)));
         }
     }
 }

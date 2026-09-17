@@ -55,7 +55,7 @@ namespace QuantConnect.Research.Engine.Execution
                 if (_experimentFactory != null)
                 {
                     experiment = _experimentFactory(job);
-                    experiment.Initialize(job.CreateExperimentContext());
+                    experiment.Initialize(CreateExperimentContext(job));
                 }
 
                 // Delayed labels: one bounded resolver per horizon, active only when the job declares
@@ -121,7 +121,9 @@ namespace QuantConnect.Research.Engine.Execution
                     var eventStream = BuildEventStream(job, symbol, runConfig);
                     var stateReconstructor = MarketStateReconstructorFactory.Create(symbol.SecurityType);
                     var replayEngine = new EventReplayEngine(runConfig, stateReconstructor);
-                    var featureEngine = FeatureEngine.FromNames(job.Features);
+                    var featureEngine = FeatureEngine.FromNames(
+                        job.Features,
+                        FeatureParameters.ParseJobConfig(job.ExperimentConfig));
 
                     using var outputStream = _outputStore.OpenWrite(outputPath);
                     using var writer = new ResearchOutputWriter(outputStream, job.OutputFormat);
@@ -142,7 +144,13 @@ namespace QuantConnect.Research.Engine.Execution
                         var row = featureResult.ToRow();
                         row["job_id"] = job.JobId;
                         row["symbol"] = symbol.Value;
-
+                        if (job.RawFields != null)
+                        {
+                            foreach (var rawField in job.RawFields)
+                            {
+                                row[rawField] = RawFieldValues.For(observation, rawField);
+                            }
+                        }
                         writer.WriteRow(row);
                         observationsWritten++;
                         result.ObservationsWritten++;
@@ -247,6 +255,20 @@ namespace QuantConnect.Research.Engine.Execution
 
             result.EndTimeUtc = DateTime.UtcNow;
             return result;
+        }
+
+        /// <summary>
+        /// Creates the experiment context, additionally exposing the job-level horizon list to the
+        /// experiment as the "horizons" config key (comma separated).
+        /// </summary>
+        private static ExperimentContext CreateExperimentContext(ResearchJob job)
+        {
+            var context = job.CreateExperimentContext();
+            if (job.Horizons is { Count: > 0 })
+            {
+                context.Configuration["horizons"] = string.Join(",", job.Horizons);
+            }
+            return context;
         }
 
         /// <summary>

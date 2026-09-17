@@ -178,6 +178,16 @@ namespace QuantConnect.Research.Engine.MarketState
         {
             if (evt == null) return;
 
+            // Adopt the event's symbol when the state has none yet (reconstruction path always
+            // creates states empty and fills them from incoming events).
+            if (evt.Symbol != null
+                && !string.IsNullOrEmpty(evt.Symbol.Value)
+                && (Symbol == null || string.IsNullOrEmpty(Symbol.Value)))
+            {
+                Symbol = evt.Symbol;
+                AssetClass = evt.Symbol.SecurityType;
+            }
+
             // Update timestamp (use latest event timestamp)
             if (evt.Timestamp > Timestamp)
                 Timestamp = evt.Timestamp;

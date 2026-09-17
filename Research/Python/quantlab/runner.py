@@ -66,6 +66,7 @@ class ResearchJob:
     checkpoint_directory: str = ""
     reorder: str = "fullsort"
     job_id: str = ""
+    source: Dict[str, Any] = field(default_factory=dict)
 
     def config_hash(self) -> str:
         """Deterministic job id: SHA256 of the configuration."""
@@ -110,6 +111,10 @@ class ResearchJob:
             "checkpointDirectory": self.checkpoint_directory,
             "reorder": _format_reorder(self.reorder),
         }
+
+        if self.source:
+            job["source"] = dict(self.source)
+        return job
 
 
 def find_runner(build: bool = False) -> Path:
