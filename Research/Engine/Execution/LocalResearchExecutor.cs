@@ -55,7 +55,10 @@ namespace QuantConnect.Research.Engine.Execution
                 if (_experimentFactory != null)
                 {
                     experiment = _experimentFactory(job);
-                    experiment.Initialize(CreateExperimentContext(job));
+                    if (experiment != null)
+                    {
+                        experiment.Initialize(CreateExperimentContext(job));
+                    }
                 }
 
                 // Delayed labels: one bounded resolver per horizon, active only when the job declares
