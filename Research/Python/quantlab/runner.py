@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -13,6 +14,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 ENGINE_DLL_NAME = "QuantConnect.Research.Runner.dll"
+
+
+def python_dll_default() -> Optional[str]:
+    """The CPython runtime DLL next to the running interpreter, for pythonnet.
+
+    The engine's embedded Python needs ``PYTHONNET_PYDLL`` to point at the CPython
+    DLL (e.g. ``python313.dll``). Deriving it from ``sys.executable`` means runs
+    work from any terminal/editor without setting the variable by hand.
+    """
+    try:
+        root = Path(sys.executable).resolve().parent
+    except Exception:  # noqa: BLE001
+        return None
+    expected = root / f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    if expected.is_file():
+        return str(expected)
+    for candidate in sorted(root.glob("python*.dll")):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _repo_root() -> Path:
@@ -53,7 +74,7 @@ class ResearchJob:
     start_time: str = ""
     end_time: str = ""
     event_types: List[str] = field(default_factory=list)
-    observation_interval_seconds: float = 0.1
+    observation_interval_seconds: Optional[float] = 0.1
     features: List[str] = field(default_factory=list)
     experiment_name: str = ""
     experiment_config: Dict[str, str] = field(default_factory=dict)
@@ -66,6 +87,8 @@ class ResearchJob:
     checkpoint_directory: str = ""
     reorder: str = "fullsort"
     job_id: str = ""
+    strategy_script: str = ""
+    raw_fields: List[str] = field(default_factory=list)
     source: Dict[str, Any] = field(default_factory=dict)
 
     def config_hash(self) -> str:
@@ -88,17 +111,17 @@ class ResearchJob:
         if isinstance(end, datetime):
             end = end.isoformat()
 
-        return {
+        job = {
             "jobId": self.job_id or self.config_hash(),
             "dataset": self.dataset,
             "symbols": list(self.symbols),
             "assetClass": self.asset_class,
             "venue": self.venue,
             "resolution": self.resolution,
-            "startTime": start,
-            "endTime": end,
             "eventTypes": list(self.event_types),
-            "observationInterval": _format_timespan(self.observation_interval_seconds),
+            "observationInterval": None
+            if self.observation_interval_seconds is None
+            else _format_timespan(self.observation_interval_seconds),
             "features": list(self.features),
             "experimentName": self.experiment_name,
             "experimentConfig": dict(self.experiment_config),
@@ -112,8 +135,16 @@ class ResearchJob:
             "reorder": _format_reorder(self.reorder),
         }
 
+        if start:
+            job["startTime"] = start
+        if end:
+            job["endTime"] = end
         if self.source:
             job["source"] = dict(self.source)
+        if self.strategy_script:
+            job["strategyScript"] = self.strategy_script
+        if self.raw_fields:
+            job["rawFields"] = list(self.raw_fields)
         return job
 
 
@@ -202,7 +233,9 @@ def run(
         job_file.write_text(json.dumps(job.to_job_dict(), indent=2, default=str), encoding="utf-8")
 
         cmd = ["dotnet", str(dll), "--job-file", str(job_file), "--data-dir", data_dir]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        env = dict(os.environ)
+        env.setdefault("PYTHONNET_PYDLL", python_dll_default() or "")
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
     manifest = {}
     manifest_path = Path(job.output_location) / job.to_job_dict()["jobId"] / "manifest.json"

@@ -1,0 +1,24 @@
+{
+  "jobId": "hypothesis-imbalance-demo",
+  "dataset": "crypto",
+  "symbols": ["BTCUSDT"],
+  "assetClass": "crypto",
+  "venue": "binance",
+  "resolution": "Minute",
+  "startTime": "2024-01-01T00:00:00",
+  "endTime": "2024-01-01T01:00:00",
+  "eventTypes": ["OrderBookUpdate", "Trade", "Quote"],
+  "observationInterval": "00:01:00",
+  "features": ["imbalance", "bid_depth", "ask_depth", "mid_price"],
+  "experimentName": "hypothesis",
+  "experimentConfig": {
+    "condition": "imbalance < -0.50",
+    "signal": "ask_pressure",
+    "outcome_observation_horizons": "1,5,20",
+    "direction": "up"
+  },
+  "outputFormat": "csv",
+  "reorder": "InOrderStreaming",
+  "enableCheckpointing": false,
+  "source": { "mode": "feed", "provider": "binance" }
+}

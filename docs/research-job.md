@@ -29,8 +29,11 @@ case-insensitively, resolves physical data/output roots, and executes it.
 
   // Experiment + delayed labels
   "experimentName": "dry-run",               // REQUIRED (validation fails if empty)
+                                             //   dry-run | liquidity_trend | hypothesis | python_strategy
+                                             //   or a comma list -> runs all over one replay (composite)
   "experimentConfig": {},
-  "horizons": ["5m"],                        // optional delayed-label horizons
+  "strategyScript": "",                      // REQUIRED for python_strategy (absolute/.py path)
+  "horizons": ["5m"],                        // optional delayed-label horizons (time-based)
 
   // Output
   "outputFormat": "csv",                     // csv | json | parquet
@@ -50,6 +53,8 @@ Failing any of these throws `InvalidOperationException` (`Validate`):
 - `startTime < endTime`
 - `observationInterval > 0`
 - `experimentName` non-empty
+- `strategyScript` non-empty when `experimentName` is `python_strategy` (full contract in
+  [python-strategies.md](python-strategies.md))
 
 ## Example: real Bybit BTCUSDT day (2161 events → 289 obs)
 
@@ -96,12 +101,44 @@ Output layout:
 Invalid/empty/non-positive values throw `FormatException` (the executor fails
 the job).
 
+The `hypothesis` experiment waits a fixed number of **observations** instead of
+wall-clock time (`outcome_observation_horizons: "1,5,20"`), so it resolves its
+own forward labels and needs no `horizons` entry — full config keys in
+`research-layer.md`.
+
+## Feed mode ("source.mode": "feed")
+
+`source.mode = "feed"` reads CSV files staged in the DataFeeds layout instead of
+the Lean zip store; `--data-dir` is the feed root:
+
+```
+<data-dir>/<assetClass>/<provider>/<symbol>/
+  bars_<seconds>.csv     timestamp_ms,open,high,low,close,volume
+  trades.csv             timestamp_ms,price,size,side,trade_id
+  quotes.csv             timestamp_ms,bid_price,bid_size,ask_price,ask_size
+  book_updates.csv       timestamp_ms,side,price,quantity,action   (order book levels)
+```
+
+`OrderBookUpdate` must be in `eventTypes` to read `book_updates.csv`. Order book
+data is what feeds depth measurements (`bid_depth`, `ask_depth`, `imbalance`,
+`depth_ratio`, ...); without it those measurements are constant 0 and a
+depth-based condition never fires. A runnable example lives at
+`docs/examples/hypothesis/` (`book_updates.csv` made ask-heavy, then flipping
+bid-heavy, plus `trades.csv`/`quotes.csv`):
+
+```
+dotnet run --project Research\Runner -- --job-file docs\examples\hypothesis\job.json ^
+  --data-dir docs\examples\hypothesis\data --output-dir .\research\results
+```
+
 ## Configuration hash / reproducibility
 
 `GetConfigurationHash()` (SHA-256) covers everything that changes the replay
 ground truth: dataset, symbols, asset class, venue, resolution, start/end
 times, event types, observation interval, features, experiment name, horizons,
-engine version, and reorder mode.
+engine version, reorder mode, and `strategyScript` (for `python_strategy`).
+`experimentConfig` is NOT hashed because it is filtered through the experiment;
+if a value in it feeds the hypothesis, set it in the script itself.
 
 It deliberately EXCLUDES physical/platform concerns that do not affect the
 logical outcome:

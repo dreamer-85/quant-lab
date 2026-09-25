@@ -45,6 +45,16 @@ namespace QuantConnect.Research.Engine.Ingest.Bybit
             {
                 if (quoteMode)
                 {
+                    // Bybit depth-1 streams re-send the current top-of-book as full "snapshot"
+                    // frames on every change. A snapshot replaces the entire book, so stale
+                    // top-of-book levels must be cleared before applying it; otherwise obsolete
+                    // best bids/asks accumulate and the reconstructed L1 freezes on them (a
+                    // falling market then yields crossed quotes with a negative spread).
+                    if (frame.Type.Equals("snapshot", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _bids.Clear();
+                        _asks.Clear();
+                    }
                     ApplyBookFrame(frame);
                     if (_bids.Count > 0 && _asks.Count > 0)
                     {

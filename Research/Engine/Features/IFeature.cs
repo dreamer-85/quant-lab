@@ -18,6 +18,14 @@ namespace QuantConnect.Research.Engine.Features
         string Description { get; }
 
         /// <summary>
+        /// Names of other measurements this feature reads from. Declared dependencies let the
+        /// <see cref="FeatureEngine"/> compute values in dependency order and compute only the
+        /// transitive closure of what a job selected. Raw measurements (fields read straight off
+        /// the observation/state) return an empty list.
+        /// </summary>
+        IReadOnlyList<string> Dependencies { get; }
+
+        /// <summary>
         /// Computes the feature value from market state.
         /// This method MUST NOT use any future information.
         /// </summary>
@@ -67,5 +75,30 @@ namespace QuantConnect.Research.Engine.Features
         /// Gets the current observation index (0-based)
         /// </summary>
         public int CurrentIndex => HistoricalObservations.Count - 1;
+
+        /// <summary>
+        /// Measurements computed so far for the current observation, keyed by measurement name and
+        /// in dependency order (dependencies are always present before the dependent). The engine
+        /// repopulates this before each <see cref="IFeature.Compute"/> call, so derived measurements
+        /// can read their inputs with <see cref="GetMeasurement"/> instead of recomputing them.
+        /// </summary>
+        public Dictionary<string, decimal> CurrentMeasurements { get; set; } = new();
+
+        /// <summary>
+        /// Whether a measurement value is available for the current observation.
+        /// </summary>
+        public bool HasMeasurement(string name)
+        {
+            return name != null && CurrentMeasurements.ContainsKey(name);
+        }
+
+        /// <summary>
+        /// Gets a previously computed measurement value for the current observation. Returns 0 when
+        /// the measurement has not been computed yet (or was not selected).
+        /// </summary>
+        public decimal GetMeasurement(string name)
+        {
+            return name != null && CurrentMeasurements.TryGetValue(name, out var value) ? value : 0m;
+        }
     }
 }

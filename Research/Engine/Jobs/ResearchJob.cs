@@ -21,13 +21,26 @@ namespace QuantConnect.Research.Engine.Jobs
         public DateTime StartTime { get; set; }
         public DateTime EndTime { get; set; }
         public List<MarketEventType> EventTypes { get; set; } = new();
-        public TimeSpan ObservationInterval { get; set; } = TimeSpan.FromMilliseconds(100);
+        /// <summary>
+        /// Observation cadence on the event stream. Null selects event-driven mode: one
+        /// observation is emitted per event (the data advances the engine clock, nothing is
+        /// aggregated). A positive value emits observations on a time grid over the events.
+        /// </summary>
+        public TimeSpan? ObservationInterval { get; set; } = TimeSpan.FromMilliseconds(100);
         public List<string> Features { get; set; } = new();
         public string ExperimentName { get; set; } = string.Empty;
         public Dictionary<string, string> ExperimentConfig { get; set; } = new();
         public List<string> Horizons { get; set; } = new();
         public string OutputLocation { get; set; } = string.Empty;
         public string OutputFormat { get; set; } = "parquet";
+
+        /// <summary>
+        /// Path to a Python strategy script (.py) executed by the "python_strategy" experiment.
+        /// The script defines a class named <c>Strategy</c> with optional hooks
+        /// <c>initialize(context)</c>, <c>on_observation(observation, features)</c>,
+        /// <c>on_outcome(outcome)</c> and <c>finalize()</c>. See docs/python-strategies.md.
+        /// </summary>
+        public string StrategyScript { get; set; } = string.Empty;
 
         /// <summary>
         /// Explicit raw observation field names to append as columns on every observation output row.
@@ -102,13 +115,14 @@ namespace QuantConnect.Research.Engine.Jobs
                 StartTime.ToString("O"),
                 EndTime.ToString("O"),
                 string.Join(",", EventTypes.Select(e => e.ToString())),
-                ObservationInterval.ToString(),
+                ObservationInterval?.ToString() ?? "null",
                 string.Join(",", Features),
                 ExperimentName,
                 string.Join(",", Horizons),
                 string.Join(",", RawFields),
                 EngineVersion,
                 Reorder.ToString(),
+                StrategyScript,
                 Source == null
                     ? string.Empty
                     : string.Join("|",
@@ -144,11 +158,15 @@ namespace QuantConnect.Research.Engine.Jobs
             if (StartTime >= EndTime)
                 errors.Add("StartTime must be before EndTime");
 
-            if (ObservationInterval <= TimeSpan.Zero)
+            if (ObservationInterval.HasValue && ObservationInterval.Value <= TimeSpan.Zero)
                 errors.Add("ObservationInterval must be positive");
 
             if (string.IsNullOrEmpty(ExperimentName))
                 errors.Add("Experiment name is required");
+
+            if (string.Equals(ExperimentName?.Trim(), "python_strategy", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(StrategyScript))
+                errors.Add("StrategyScript is required for python_strategy experiments");
 
             if (Source != null && !Source.Validate(out var sourceError))
                 errors.Add($"Invalid source: {sourceError}");
@@ -186,6 +204,8 @@ namespace QuantConnect.Research.Engine.Jobs
             if (venue.Equals("usa", StringComparison.OrdinalIgnoreCase)) return QuantConnect.Market.USA;
             if (venue.Equals("cme", StringComparison.OrdinalIgnoreCase)) return QuantConnect.Market.CME;
             if (venue.Equals("bybit", StringComparison.OrdinalIgnoreCase)) return QuantConnect.Market.Bybit;
+            if (venue.Equals("okx", StringComparison.OrdinalIgnoreCase)) return QuantConnect.Market.Okx;
+            if (venue.Equals("deriv", StringComparison.OrdinalIgnoreCase)) return QuantConnect.Market.Deriv;
 
             return ResolveSecurityType(assetClass) switch
             {

@@ -15,7 +15,7 @@ deep = [
 ]
 
 [project.scripts]
-quantlab = "quantlab.cli:main"
+quantlab = "quantlab.cli:_main"
 
 [tool.setuptools]
 packages = ["quantlab"]

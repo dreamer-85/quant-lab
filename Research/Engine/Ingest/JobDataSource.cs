@@ -10,19 +10,24 @@ namespace QuantConnect.Research.Engine.Ingest
     ///   - "live"       subscribes to an exchange WebSocket feed and streams events as they arrive.
     ///   - "archive"    replays a recorded WebSocket capture (JSON-lines archive) through the same
     ///                  live-normalization path, reproducing the capture event-for-event.
+    ///   - "feed"       reads CSV files staged by the DataFeeds tooling
+    ///                  (DataFeeds/Historical|Live scripts, see DataFeeds/README.md) via
+    ///                  <see cref="LocalFeed.LocalFeedDataSource"/>, so DataFeeds output and
+    ///                  engine replay share one pipeline.
     /// The engine consumes the normalized <see cref="Events.MarketEvent"/> stream produced by the
-    /// <see cref="ExchangeDataAdapter"/>/<see cref="Bybit.BybitArchiveSource"/>, so all modes share
-    /// one replay pipeline.
+    /// <see cref="ExchangeDataAdapter"/>/<see cref="Bybit.BybitArchiveSource"/>/feed readers, so all
+    /// modes share one replay pipeline.
     /// </summary>
     public class JobDataSource
     {
         /// <summary>
-        /// Mode: "file", "historical", "live", or "archive". Defaults to "file".
+        /// Mode: "file", "historical", "live", "archive", or "feed". Defaults to "file".
         /// </summary>
         public string Mode { get; set; } = "file";
 
         /// <summary>
-        /// Exchange provider identifier (currently "bybit").
+        /// Exchange provider identifier (currently "bybit"; also "okx"/"binance" for DataFeeds
+        /// "feed" mode, "deriv" for forex).
         /// </summary>
         public string Provider { get; set; } = "bybit";
 
@@ -66,15 +71,16 @@ namespace QuantConnect.Research.Engine.Ingest
         public string ArchiveFilePath { get; set; } = string.Empty;
 
         /// <summary>
-        /// True when this source is an exchange-backed adapter or archive replay rather than the
-        /// Lean zip store.
+        /// True when this source is an exchange-backed adapter, archive replay, or DataFeeds
+        /// CSV feed rather than the Lean zip store.
         /// </summary>
         public bool IsExchangeSource()
         {
             return Mode != null
                 && (Mode.Equals("historical", StringComparison.OrdinalIgnoreCase)
                     || Mode.Equals("live", StringComparison.OrdinalIgnoreCase)
-                    || Mode.Equals("archive", StringComparison.OrdinalIgnoreCase));
+                    || Mode.Equals("archive", StringComparison.OrdinalIgnoreCase)
+                    || Mode.Equals("feed", StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>

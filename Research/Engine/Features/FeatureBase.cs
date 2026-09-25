@@ -18,6 +18,13 @@ namespace QuantConnect.Research.Engine.Features
         public virtual string Description => Name;
 
         /// <summary>
+        /// Other measurements this feature reads from. Empty by default; derived measurements that
+        /// read previously computed values through <see cref="FeatureContext.GetMeasurement"/>
+        /// should list them so the engine orders computation correctly.
+        /// </summary>
+        public virtual IReadOnlyList<string> Dependencies => Array.Empty<string>();
+
+        /// <summary>
         /// Computes the feature value from market state.
         /// This method MUST NOT use any future information.
         /// </summary>

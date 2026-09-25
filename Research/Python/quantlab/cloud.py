@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -265,6 +266,25 @@ def _gcloud(args: Sequence[str], env: Optional[Dict[str, str]] = None, check: bo
     run(binary, list(args), check=check)
 
 
+def _resolve_local_strategy(payload: Dict[str, object]) -> Optional[Path]:
+    """Local strategy script referenced by a job (top-level or experimentConfig 'script')."""
+    candidates = []
+    config = payload.get("experimentConfig")
+    for raw in (payload.get("strategyScript"), config.get("script") if isinstance(config, dict) else None):
+        if raw:
+            path = Path(str(raw))
+            if path.is_file():
+                candidates.append(path.resolve())
+    if not candidates:
+        return None
+    if len(set(candidates)) > 1:
+        raise ValueError(
+            "strategyScript and experimentConfig['script'] point to different local files; "
+            "keep them consistent."
+        )
+    return candidates[0]
+
+
 def submit_job(
     job_file: str,
     vm: str = "",
@@ -276,11 +296,18 @@ def submit_job(
     skip_scp: bool = False,
     env_file: Optional[str] = None,
 ) -> None:
-    """Uploads a job file to the VM and runs it there synchronously.
+    """Uploads a job file (and any local Python strategy script it references) to the VM and runs it.
 
-    Requires ``gcloud`` authenticated. Uses the VM repo (default
-    ``~/myEngine``) and the VM's ``deploy/cloud/environment`` for data/output
-    roots; explicit ``data_dir``/``output_dir`` override them.
+    Requires ``gcloud`` authenticated. Uses the VM repo (default ``~/myEngine``)
+    and the VM's ``deploy/cloud/environment`` for data/output roots; explicit
+    ``data_dir``/``output_dir`` override them.
+
+    When the job's ``strategyScript`` (or ``experimentConfig["script"]``) points
+    at a local file, it is copied to ``<repo>/Research/Python/_strategy_<name>.py``
+    on the VM and the remote job is rewritten to reference that path (relative to
+    the repo, where run-job.sh launches the runner). The copy lives beside the
+    quantlab package so a strategy that imports
+    ``quantlab.research.ResearchStrategy`` resolves it from the repo.
     """
     env = environment(env_file, vm=vm, zone=zone, project=project)
     target_vm = env.get("QUANTLAB_VM") or None
@@ -288,6 +315,11 @@ def submit_job(
         raise ValueError("no VM configured: set QUANTLAB_VM (or pass --vm)")
     target_zone = env.get("QUANTLAB_ZONE") or None
     target_project = env.get("QUANTLAB_PROJECT") or None
+
+    job_path = Path(job_file)
+    if not job_path.is_file():
+        raise FileNotFoundError(f"job file not found: {job_path}")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
 
     scp_args = ["compute", "scp"]
     ssh_args = ["compute", "ssh"]
@@ -298,15 +330,42 @@ def submit_job(
         scp_args += ["--zone", target_zone]
         ssh_args += ["--zone", target_zone]
 
-    remote_job = f"~/job-{Path(job_file).name}"
-    if not skip_scp:
-        _gcloud([*scp_args, str(job_file), f"{target_vm}:{remote_job}"])
-
     repo = repo_dir or env.get("QUANTLAB_REPO_DIR", "myEngine")
+    scp_name = ""
+    remote_strategy = None
+    if not skip_scp:
+        local_strategy = _resolve_local_strategy(payload)
+        if local_strategy is not None:
+            copy_name = "_strategy_" + local_strategy.name
+            scp_name = "strategy_tmp_" + local_strategy.name
+            _gcloud([*scp_args, str(local_strategy), f"{target_vm}:~/{scp_name}"])
+            remote_strategy = f"Research/Python/{copy_name}"
+
+            config = payload.get("experimentConfig")
+            if isinstance(config, dict) and config.get("script"):
+                config["script"] = remote_strategy
+            payload["strategyScript"] = remote_strategy
+
+    remote_job = f"~/job-{job_path.name}"
+    if not skip_scp:
+        if remote_strategy is None:
+            job_source = str(job_path)
+        else:
+            with tempfile.TemporaryDirectory(prefix="quantlab_") as tmp:
+                rewritten = Path(tmp) / job_path.name
+                rewritten.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                job_source = str(rewritten)
+        _gcloud([*scp_args, job_source, f"{target_vm}:{remote_job}"])
+
     data_part = f' --data-dir "{data_dir}"' if data_dir else ""
     output_part = f' --output-dir "{output_dir}"' if output_dir else ""
-    command = (
-        f"cd {repo} && "
+    command = f"cd {repo} && "
+    if remote_strategy is not None:
+        command += (
+            f"mkdir -p Research/Python && "
+            f"cp \"$HOME/{scp_name}\" {remote_strategy} && "
+        )
+    command += (
         f"source deploy/cloud/environment && "
         f"deploy/cloud/run-job.sh {remote_job.replace('~', '$HOME')}{data_part}{output_part}"
     )
@@ -368,7 +427,11 @@ def run_local_dict(
         start_time=str(payload.get("startTime", "")),
         end_time=str(payload.get("endTime", "")),
         event_types=[str(e) for e in payload.get("eventTypes", [])],
-        observation_interval_seconds=_parse_timespan(str(payload.get("observationInterval", "00:00:00.100"))),
+        observation_interval_seconds=(
+            None
+            if payload.get("observationInterval") is None
+            else _parse_timespan(str(payload.get("observationInterval", "00:00:00.100")))
+        ),
         features=[str(f) for f in payload.get("features", [])],
         experiment_name=str(payload.get("experimentName", "")),
         experiment_config={str(k): str(v) for k, v in payload.get("experimentConfig", {}).items()},
@@ -381,6 +444,9 @@ def run_local_dict(
         checkpoint_directory=str(payload.get("checkpointDirectory", "")),
         reorder=str(payload.get("reorder", "fullsort")),
         job_id=str(payload.get("jobId", "")),
+        strategy_script=str(payload.get("strategyScript", "")),
+        raw_fields=[str(f) for f in payload.get("rawFields", [])],
+        source=dict(payload.get("source", {}) or {}),
     )
     if output_dir:
         job.output_location = output_dir

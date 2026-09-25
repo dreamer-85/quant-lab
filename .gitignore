@@ -290,3 +290,11 @@ QuantConnect.Lean.sln.DotSettings
 # Cloud deployment secrets (never commit)
 deploy/cloud/environment
 deploy/cloud/.env
+
+# DataFeeds generated market data + local state
+feeds/
+DataFeeds/feeds/
+_datafeeds.log
+.venv/
+__pycache__/
+*.egg-info/

@@ -51,9 +51,27 @@ namespace QuantConnect.Tests.Research.EngineTests
             };
         }
 
+        private static ReplayConfiguration BuildPerEventConfig(ReorderMode reorder)
+        {
+            return new ReplayConfiguration
+            {
+                StartTime = _start,
+                EndTime = _end,
+                Symbols = new List<Symbol> { _sBybit },
+                ObservationInterval = null,
+                Reorder = reorder
+            };
+        }
+
         private static List<ReplayResult> Run(ReorderMode reorder, IEnumerable<MarketEvent> events)
         {
             var engine = new EventReplayEngine(BuildConfig(reorder), MarketStateReconstructorFactory.Create(SecurityType.Crypto));
+            return engine.Replay(events).ToList();
+        }
+
+        private static List<ReplayResult> RunPerEvent(ReorderMode reorder, IEnumerable<MarketEvent> events)
+        {
+            var engine = new EventReplayEngine(BuildPerEventConfig(reorder), MarketStateReconstructorFactory.Create(SecurityType.Crypto));
             return engine.Replay(events).ToList();
         }
 
@@ -184,6 +202,76 @@ namespace QuantConnect.Tests.Research.EngineTests
             var fullSortEngine = new EventReplayEngine(BuildConfig(ReorderMode.FullSort), MarketStateReconstructorFactory.Create(SecurityType.Crypto));
             fullSortEngine.Replay(EventStreamMerger.Merge(new[] { LazyEvents() })).First();
             Assert.AreEqual(999, maxProduced, "Full-sort replay must consume the whole source before yielding");
+        }
+
+        // ---------------------------------------------------------------------------
+        // Event-driven mode (ObservationInterval == null): one observation per event
+        // ---------------------------------------------------------------------------
+
+        [Test]
+        public void EventDrivenMode_EmitsOneObservationPerEvent()
+        {
+            var events = new List<MarketEvent>
+            {
+                Trade(_start.AddSeconds(1), 17200, 1),
+                Trade(_start.AddSeconds(2), 17250, 2),
+                Quote(_start.AddSeconds(3), 17249m, 17251m)
+            };
+
+            var results = RunPerEvent(ReorderMode.InOrderStreaming, events).ToList();
+
+            Assert.AreEqual(3, results.Count, "one observation per event, nothing aggregated or dropped");
+            Assert.AreEqual(_start.AddSeconds(1), results[0].Timestamp);
+            Assert.AreEqual(_start.AddSeconds(2), results[1].Timestamp);
+            Assert.AreEqual(_start.AddSeconds(3), results[2].Timestamp);
+            Assert.AreEqual(1, results[0].Events.Count);
+            Assert.AreEqual(1, results[2].Events.Count);
+
+            // The observation carries the aggregated state as-of that event (Len-style clock,
+            // state accrues across events).
+            Assert.AreEqual(17250m, (results[1].State as MarketState)?.LastPrice);
+            Assert.AreEqual(17251m, (results[2].State as MarketState)?.AskPrice);
+        }
+
+        [Test]
+        public void EventDrivenMode_FullSortMatchesStreaming()
+        {
+            var events = new List<MarketEvent>
+            {
+                Quote(_start.AddSeconds(1), 17199m, 17201m),
+                Trade(_start.AddSeconds(2), 17200, 1),
+                Quote(_start.AddSeconds(3), 17199m, 17201m),
+                Trade(_start.AddSeconds(4), 17250, 2)
+            };
+
+            var fullSort = RunPerEvent(ReorderMode.FullSort, events);
+            var streaming = RunPerEvent(ReorderMode.InOrderStreaming, events);
+
+            CollectionAssert.AreEqual(
+                fullSort.Select(ResultSignature).ToList(),
+                streaming.Select(ResultSignature).ToList());
+            Assert.AreEqual(fullSort.Count, 4);
+        }
+
+        [Test]
+        public void EventDrivenMode_AppliesEventTypeAndTimeFilters()
+        {
+            var events = new List<MarketEvent>
+            {
+                Trade(_start.AddSeconds(1), 17200, 1),
+                Trade(_start.AddSeconds(2), 17250, 2),
+                Quote(_start.AddSeconds(3), 17249m, 17251m)
+            };
+            var config = BuildPerEventConfig(ReorderMode.InOrderStreaming);
+            config.EventTypes = new List<MarketEventType> { MarketEventType.Trade };
+            config.EndTime = _start.AddSeconds(2);
+
+            var engine = new EventReplayEngine(config, MarketStateReconstructorFactory.Create(SecurityType.Crypto));
+            var results = engine.Replay(events).ToList();
+
+            Assert.AreEqual(2, results.Count);
+            Assert.AreEqual(_start.AddSeconds(1), results[0].Timestamp);
+            Assert.AreEqual(_start.AddSeconds(2), results[1].Timestamp);
         }
     }
 }

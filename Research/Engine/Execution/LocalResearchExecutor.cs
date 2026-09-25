@@ -210,7 +210,7 @@ namespace QuantConnect.Research.Engine.Execution
                         experiment?.OnOutcome(new OutcomeData
                         {
                             ReferenceTimestamp = replayEngine.LastProcessedTimestamp ?? job.EndTime,
-                            Horizon = job.ObservationInterval,
+                            Horizon = job.ObservationInterval ?? TimeSpan.Zero,
                             OutcomeState = lastState
                         });
                     }

@@ -1,0 +1,1 @@
+"""Core DataFeeds framework: shared data model, intervals, io, registry and base classes."""

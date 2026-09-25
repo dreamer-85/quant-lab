@@ -292,6 +292,7 @@ namespace QuantConnect.Tests.Research.EngineTests
             public string Name => "probe";
             public string Description => "Lookahead probe";
             public List<ProbeSnapshot> Snapshots { get; } = new();
+            public IReadOnlyList<string> Dependencies => Array.Empty<string>();
 
             public decimal Compute(Observation observation, FeatureContext context)
             {

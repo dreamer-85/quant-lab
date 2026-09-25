@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using QuantConnect.Research.Engine.Events;
 using QuantConnect.Research.Engine.Observations;
 
@@ -97,6 +98,39 @@ namespace QuantConnect.Research.Engine.Features
     /// </summary>
     public static class RawFieldValues
     {
+        /// <summary>
+        /// Machine-readable descriptions of every raw field this class can resolve. This table is
+        /// the single source of truth for the raw-field namespace (names, types, sources); the
+        /// <see cref="MeasurementCatalog"/> unifies it with the feature registry.
+        /// </summary>
+        public static readonly IReadOnlyList<MeasurementDescriptor> Descriptors = new[]
+        {
+            new MeasurementDescriptor("symbol", MeasurementKind.Raw, typeof(string), "Symbol value", "observation"),
+            new MeasurementDescriptor("timestamp", MeasurementKind.Raw, typeof(DateTime), "Observation timestamp", "observation"),
+            new MeasurementDescriptor("mid_price", MeasurementKind.Raw, typeof(decimal), "Market state mid price", "state"),
+            new MeasurementDescriptor("bid_price", MeasurementKind.Raw, typeof(decimal), "Market state best bid price", "state"),
+            new MeasurementDescriptor("ask_price", MeasurementKind.Raw, typeof(decimal), "Market state best ask price", "state"),
+            new MeasurementDescriptor("last_price", MeasurementKind.Raw, typeof(decimal), "Market state last traded price", "state"),
+            new MeasurementDescriptor("spread", MeasurementKind.Raw, typeof(decimal), "Top-of-book spread", "state"),
+            new MeasurementDescriptor("spread_bps", MeasurementKind.Raw, typeof(decimal), "Top-of-book spread in basis points", "state"),
+            new MeasurementDescriptor("depth", MeasurementKind.Raw, typeof(decimal), "Total order book depth (bid + ask)", "state"),
+            new MeasurementDescriptor("bid_depth", MeasurementKind.Raw, typeof(decimal), "Total order book depth on bid side", "state"),
+            new MeasurementDescriptor("ask_depth", MeasurementKind.Raw, typeof(decimal), "Total order book depth on ask side", "state"),
+            new MeasurementDescriptor("volume", MeasurementKind.Raw, typeof(decimal), "Traded volume since the previous observation", "events"),
+            new MeasurementDescriptor("trade_count", MeasurementKind.Raw, typeof(decimal), "Number of trades since the previous observation", "events"),
+            new MeasurementDescriptor("vwap", MeasurementKind.Raw, typeof(decimal), "Volume weighted average price of the period's trades", "events"),
+            new MeasurementDescriptor("open_price", MeasurementKind.Raw, typeof(decimal), "Price at the start of the observation period", "events"),
+            new MeasurementDescriptor("high_price", MeasurementKind.Raw, typeof(decimal), "Highest trade price in the observation period", "events"),
+            new MeasurementDescriptor("low_price", MeasurementKind.Raw, typeof(decimal), "Lowest trade price in the observation period", "events"),
+            new MeasurementDescriptor("close_price", MeasurementKind.Raw, typeof(decimal), "Price at the end of the observation period", "events"),
+            new MeasurementDescriptor("trade_flow", MeasurementKind.Raw, typeof(decimal), "Signed notional flow of the period's trades (+buy, -sell)", "events")
+        };
+
+        /// <summary>
+        /// All raw field names this class can resolve.
+        /// </summary>
+        public static IReadOnlyList<string> Names { get; } = Descriptors.Select(d => d.Name).ToList();
+
         public static object For(Observation observation, string field)
         {
             if (observation == null)
@@ -142,9 +176,7 @@ namespace QuantConnect.Research.Engine.Features
                     return flow;
                 default:
                     throw new InvalidOperationException(
-                        $"Unknown raw field '{field}'. Supported fields: symbol, timestamp, mid_price, bid_price, ask_price, " +
-                        "last_price, spread, spread_bps, depth, bid_depth, ask_depth, volume, trade_count, vwap, " +
-                        "open_price, high_price, low_price, close_price, trade_flow");
+                        $"Unknown raw field '{field}'. Supported fields: {string.Join(", ", Names)}");
             }
         }
     }

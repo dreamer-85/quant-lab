@@ -5,6 +5,7 @@ using QuantConnect.Research.Engine.Events;
 using QuantConnect.Research.Engine.Execution;
 using QuantConnect.Research.Engine.Ingest;
 using QuantConnect.Research.Engine.Ingest.Bybit;
+using QuantConnect.Research.Engine.Ingest.Binance;
 using QuantConnect.Research.Engine.Jobs;
 using QuantConnect.Research.Engine.LocalData;
 
@@ -142,6 +143,63 @@ namespace QuantConnect.Tests.Research.EngineTests
             Assert.That(BybitJson.TryParseWsFrame(frameJson, out var frame), Is.True);
             Assert.That(frame.Klines.Count, Is.EqualTo(1));
             Assert.That(frame.Klines[0].Close, Is.EqualTo(30002m));
+        }
+
+        // ---------------------------------------------------------------------------
+        // Binance JSON parsers (pure, no network)
+        // ---------------------------------------------------------------------------
+
+        [Test]
+        public void BinanceJson_ParsesCombinedTradeFrame()
+        {
+            var frameJson =
+                "{\"stream\":\"btcusdt@trade\",\"data\":{\"e\":\"trade\",\"E\":1671284736302,\"s\":\"BTCUSDT\"," +
+                "\"t\":1001,\"p\":\"30000.50\",\"q\":\"0.500\",\"T\":1671284736302,\"m\":false,\"M\":true}}";
+            Assert.That(BinanceJson.TryParseWsFrame(frameJson, out var frame), Is.True);
+            Assert.That(frame.Stream, Is.EqualTo("btcusdt@trade"));
+            Assert.That(frame.Trade.HasValue, Is.True);
+            Assert.That(frame.Trade.Value.Price, Is.EqualTo(30000.50m));
+            Assert.That(frame.Trade.Value.Quantity, Is.EqualTo(0.500m));
+            Assert.That(frame.Trade.Value.BuyerIsMaker, Is.False);
+            Assert.That(frame.Trade.Value.EventId, Is.EqualTo("1001"));
+        }
+
+        [Test]
+        public void BinanceJson_ParsesCombinedBookTickerFrame()
+        {
+            var frameJson =
+                "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":400900217,\"s\":\"BTCUSDT\"," +
+                "\"b\":\"29990.00\",\"B\":\"2.100\",\"a\":\"30010.00\",\"A\":\"3.200\",\"T\":1671284736302}}";
+            Assert.That(BinanceJson.TryParseWsFrame(frameJson, out var frame), Is.True);
+            Assert.That(frame.Stream, Is.EqualTo("btcusdt@bookTicker"));
+            Assert.That(frame.Quote.HasValue, Is.True);
+            Assert.That(frame.Quote.Value.Bid, Is.EqualTo(29990.00m));
+            Assert.That(frame.Quote.Value.Ask, Is.EqualTo(30010.00m));
+            Assert.That(frame.Quote.Value.BidSize, Is.EqualTo(2.1m));
+            Assert.That(frame.Quote.Value.AskSize, Is.EqualTo(3.2m));
+            Assert.That(frame.Quote.Value.UpdateId, Is.EqualTo(400900217));
+        }
+
+        [Test]
+        public void BinanceJson_ParsesCombinedKlineFrame()
+        {
+            var frameJson =
+                "{\"stream\":\"btcusdt@kline_1m\",\"data\":{\"e\":\"kline\",\"E\":1671284736302,\"s\":\"BTCUSDT\"," +
+                "\"k\":{\"t\":1671284640000,\"T\":1671284699999,\"s\":\"BTCUSDT\",\"i\":\"1m\",\"o\":\"30000\"," +
+                "\"h\":\"30050\",\"l\":\"29990\",\"c\":\"30020\",\"v\":\"12.500\",\"n\":100,\"x\":true}}}";
+            Assert.That(BinanceJson.TryParseWsFrame(frameJson, out var frame), Is.True);
+            Assert.That(frame.Stream, Is.EqualTo("btcusdt@kline_1m"));
+            Assert.That(frame.Bar.HasValue, Is.True);
+            Assert.That(frame.Bar.Value.OpenTimeMs, Is.EqualTo(1671284640000));
+            Assert.That(frame.Bar.Value.Close, Is.EqualTo(30020m));
+            Assert.That(frame.Bar.Value.Volume, Is.EqualTo(12.5m));
+        }
+
+        [Test]
+        public void BinanceJson_IgnoresPongAndUnknownFrames()
+        {
+            Assert.That(BinanceJson.TryParseWsFrame("{\"id\":1,\"result\":{}}", out _), Is.False);
+            Assert.That(BinanceJson.TryParseWsFrame("{\"stream\":\"btcusdt@trade\",\"data\":{}}", out _), Is.False);
         }
 
         // ---------------------------------------------------------------------------
@@ -288,6 +346,36 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         [Test]
+        public void LiveAdapter_BybitL1SnapshotsReplaceBookInsteadOfAccumulating()
+        {
+            var now = Now;
+            var ws = new WsStub(
+                "{\"topic\":\"orderbook.1.BTCUSDT\",\"type\":\"snapshot\",\"ts\":" + now + "," +
+                "\"data\":{\"s\":\"BTCUSDT\",\"b\":[[\"29990\",\"2\"]],\"a\":[[\"30010\",\"3\"]]}}",
+                "{\"topic\":\"orderbook.1.BTCUSDT\",\"type\":\"snapshot\",\"ts\":" + (now + 100) + "," +
+                "\"data\":{\"s\":\"BTCUSDT\",\"b\":[[\"29980\",\"1\"]],\"a\":[[\"29990\",\"5\"]]}}");
+
+            var job = MinimalJob();
+            job.Reorder = QuantConnect.Research.Engine.Replay.ReorderMode.InOrderStreaming;
+            job.EventTypes = new List<MarketEventType> { MarketEventType.Quote };
+            job.Source = new JobDataSource { Mode = "live", Provider = "bybit", LiveDurationSeconds = 3 };
+
+            var adapter = new ExchangeDataAdapter(job, wsFactory: () => ws);
+            var quotes = EventStreamMerger.Merge(adapter.GetEventStreams(job, _symbol))
+                .OfType<QuoteEvent>()
+                .ToList();
+
+            Assert.That(quotes.Count, Is.EqualTo(2));
+            Assert.That(quotes[0].BidPrice, Is.EqualTo(29990m));
+            Assert.That(quotes[0].AskPrice, Is.EqualTo(30010m));
+            // A renewed depth-1 snapshot replaces the whole book: the stale 29990 best bid must
+            // not survive into the next quote (which would cross the book and invert the spread).
+            Assert.That(quotes[1].BidPrice, Is.EqualTo(29980m));
+            Assert.That(quotes[1].AskPrice, Is.EqualTo(29990m));
+            Assert.That(quotes[1].BidPrice, Is.LessThan(quotes[1].AskPrice));
+        }
+
+        [Test]
         public void LiveAdapter_RequiresInOrderStreaming()
         {
             var job = MinimalJob();
@@ -376,6 +464,72 @@ namespace QuantConnect.Tests.Research.EngineTests
             var job = MinimalJob();
             job.Source = new JobDataSource { Mode = "historical", Provider = "kraken" };
             Assert.That(() => new ExchangeDataAdapter(job), Throws.TypeOf<NotSupportedException>());
+        }
+
+        // ---------------------------------------------------------------------------
+        // Binance live adapter (fake WebSocket)
+        // ---------------------------------------------------------------------------
+
+        [Test]
+        public void LiveAdapter_BinanceStreamsTradesQuotesAndBars()
+        {
+            var ws = new WsStub(
+                "{\"stream\":\"btcusdt@trade\",\"data\":{\"e\":\"trade\",\"E\":" + Now + ",\"s\":\"BTCUSDT\",\"t\":1001,\"p\":\"30000\",\"q\":\"0.5\",\"T\":" + Now + ",\"m\":false}}",
+                "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"29990\",\"B\":\"2\",\"a\":\"30010\",\"A\":\"3\",\"T\":" + Now + "}}",
+                "{\"stream\":\"btcusdt@kline_1m\",\"data\":{\"e\":\"kline\",\"E\":" + Now + ",\"s\":\"BTCUSDT\",\"k\":{\"t\":1671284640000,\"T\":1671284699999,\"s\":\"BTCUSDT\",\"i\":\"1m\",\"o\":\"30000\",\"h\":\"30050\",\"l\":\"29990\",\"c\":\"30020\",\"v\":\"12.5\"}}}");
+
+            var job = MinimalJob();
+            job.Resolution = Resolution.Minute;
+            job.Venue = "binance";
+            job.Source = new JobDataSource { Mode = "live", Provider = "binance", LiveDurationSeconds = 3 };
+            job.Reorder = QuantConnect.Research.Engine.Replay.ReorderMode.InOrderStreaming;
+            job.EventTypes = new List<MarketEventType> { MarketEventType.Trade, MarketEventType.Quote, MarketEventType.Bar };
+
+            var binanceSymbol = Symbol.Create("BTCUSDT", SecurityType.Crypto, Market.Binance);
+            var adapter = new ExchangeDataAdapter(job, wsFactory: () => ws);
+            var events = EventStreamMerger.Merge(adapter.GetEventStreams(job, binanceSymbol)).ToList();
+
+            Assert.That(events, Is.Not.Empty);
+            Assert.That(events.Any(e => e.EventType == MarketEventType.Trade), Is.True);
+            Assert.That(events.Any(e => e.EventType == MarketEventType.Quote), Is.True);
+            Assert.That(events.Any(e => e.EventType == MarketEventType.Bar), Is.True);
+            Assert.That(((TradeEvent)events.First(e => e.EventType == MarketEventType.Trade)).Price, Is.EqualTo(30000m));
+            Assert.That(((QuoteEvent)events.First(e => e.EventType == MarketEventType.Quote)).BidPrice, Is.EqualTo(29990m));
+            Assert.That(((BarEvent)events.First(e => e.EventType == MarketEventType.Bar)).Close, Is.EqualTo(30020m));
+            Assert.That(((BarEvent)events.First(e => e.EventType == MarketEventType.Bar)).Period, Is.EqualTo(TimeSpan.FromMinutes(1)));
+            Assert.That(events.All(e => e.ArrivalTimestamp.HasValue), Is.True, "every live event carries a reception timestamp");
+            Assert.That(ws.Closed, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void LiveAdapter_BinanceEventDrivenMode_ExecutorRunsEndToEnd()
+        {
+            var minOpenMs = Now - 60_000;
+            var ws = new WsStub(
+                "{\"stream\":\"btcusdt@trade\",\"data\":{\"e\":\"trade\",\"E\":" + Now + ",\"s\":\"BTCUSDT\",\"t\":1,\"p\":\"30000\",\"q\":\"0.5\",\"T\":" + Now + ",\"m\":false}}",
+                "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":1,\"s\":\"BTCUSDT\",\"b\":\"29990\",\"B\":\"2\",\"a\":\"30010\",\"A\":\"3\",\"T\":" + Now + "}}",
+                "{\"stream\":\"btcusdt@kline_1m\",\"data\":{\"e\":\"kline\",\"E\":" + Now + ",\"s\":\"BTCUSDT\",\"k\":{\"t\":" + minOpenMs + ",\"T\":" + Now + ",\"s\":\"BTCUSDT\",\"i\":\"1m\",\"o\":\"30000\",\"h\":\"30050\",\"l\":\"29990\",\"c\":\"30020\",\"v\":\"12.5\"}}}");
+
+            var job = MinimalJob();
+            job.Resolution = Resolution.Minute;
+            job.Venue = "binance";
+            job.Source = new JobDataSource { Mode = "live", Provider = "binance", LiveDurationSeconds = 3 };
+            job.Reorder = QuantConnect.Research.Engine.Replay.ReorderMode.InOrderStreaming;
+            job.EventTypes = new List<MarketEventType> { MarketEventType.Trade, MarketEventType.Quote, MarketEventType.Bar };
+            job.ObservationInterval = null;
+            job.StartTime = DateTime.UtcNow.AddMinutes(-2);
+            job.EndTime = DateTime.UtcNow.AddMinutes(3);
+            job.OutputLocation = Path.Combine(Path.GetTempPath(), "quantlab-tests", Guid.NewGuid().ToString("N"));
+
+            var binanceSymbol = Symbol.Create("BTCUSDT", SecurityType.Crypto, Market.Binance);
+            job.Symbols = new List<string> { binanceSymbol.Value };
+            var adapter = new ExchangeDataAdapter(job, wsFactory: () => ws);
+            var executor = new LocalResearchExecutor(adapter, environment: new QuantConnect.Research.Engine.ResearchEnvironment(outputRoot: job.OutputLocation));
+            var result = executor.Execute(job);
+
+            Assert.That(result.Succeeded, Is.True, result.Error);
+            Assert.That(result.EventsProcessed, Is.EqualTo(3), "one event per observation, none lost");
+            Assert.That(result.ObservationsWritten, Is.EqualTo(3), "event-driven mode: observations == events");
         }
 
         [Test]

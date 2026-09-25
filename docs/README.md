@@ -28,6 +28,22 @@ the dataset into memory.
 - **Pluggable features and experiments.** Features register by name in
   `FeatureRegistry`; experiments consume observations/outcomes through
   `IExperiment`.
+- **Python strategy scripts.** `python_strategy` experiments run a user-written
+  `.py` file (Lean-style `initialize` / `on_observation` / `on_outcome` /
+  `finalize` hooks) over the observation/feature stream — strategy logic stays
+  entirely in Python (`python-strategies.md`). One-script research bundles the
+  whole flow: a `Research` class (or a `quantlab.research.ResearchStrategy`
+  subclass you call `.run()` on) declares the exchange/symbols/features, and
+  `quantlab research <script.py>` pulls the data, generates the job, and runs
+  the strategy; `quantlab run cloud` uploads the strategy script + job to the VM
+  for the reusable-library workflow (`docs/examples/python/research_binance.py`,
+  `docs/examples/python/research_strategy_api.py`).
+- **Research layer on top of the engine.** A measurement catalog unifies the
+  feature/raw-field namespaces with metadata, derived measurements declare their
+  dependencies (auto-ordered, transitive closure), and declarative `hypothesis`
+  experiments test "condition → signal → forward return after N observations"
+  against the existing replay — plus `composite` runs multiple experiments over
+  one replay (`research-layer.md`).
 
 ## Repository layout
 
@@ -38,8 +54,9 @@ Research/
     Events/           MarketEvent + typed events (Trade/Quote/Bar/OrderBook/...)
     MarketState/      state reconstruction + serialization for checkpoints
     Observations/     ObservationEngine (grid snapping)
-    Features/         FeatureEngine + FeatureRegistry (mid_price, spread, depth, ...)
-    Experiments/      IExperiment, ExperimentBase, DelayedLabelResolver, HorizonParser
+    Features/         FeatureEngine + FeatureRegistry + MeasurementCatalog (measurement layer)
+    Experiments/      IExperiment, ExperimentBase, DelayedLabelResolver, HorizonParser,
+                      HypothesisExperiment, CompositeExperiment, MeasurementCondition, Python/
     Execution/        LocalResearchExecutor (orchestrates per-symbol runs)
     LocalData/        LeanDataEventSource, SyntheticStreamingEventSource, EventStreamMerger
     Storage/          LocalFileStore, ResearchOutputWriter, ReplayCheckpointManager
@@ -52,11 +69,15 @@ docs/                 This documentation
 
 ## Quick start
 
-Build and run the full test suite (64 tests):
+Build and run the full test suite (160 tests):
 
 ```
 dotnet test "Tests\Research\EngineTests\QuantConnect.Research.Engine.Tests.csproj" -c Release
 ```
+
+> Python-bridge tests skip automatically when the Python runtime is not
+> configured; to include them, set `PYTHONNET_PYDLL` to a Python 3.x DLL and use
+> pythonnet `2.0.66` (see `python-strategies.md`).
 
 Run a job from JSON against real data:
 
@@ -172,3 +193,8 @@ across 100K/1M/5M events).
 - `DelayedLabelTests` — horizon parsing, resolver forward-return precision,
   bounded pending queue, tail-drop on `Complete`, outcome retention cap,
   executor end-to-end determinism.
+- `MeasurementCatalogTests` — measurement discovery/deduplication/metadata.
+- `FeatureDependencyTests` — dependency ordering, transitive closure, cycle and
+  missing-dependency rejection.
+- `HypothesisTests` — condition parsing, count-based label resolution,
+  hypothesis metrics/rows, composite fan-out, factory naming.

@@ -1,6 +1,7 @@
 """Unified QuantLab CLI: run jobs locally or on the cloud from one tool.
 
 Usage:
+    python -m quantlab research <script.py> [options]
     python -m quantlab run    local|cloud  <job.json> [options]
     python -m quantlab job    create --data-dir <lean-data> [options] [-o out.json]
     python -m quantlab bundle [build|upload] <bundle.tgz> [options]
@@ -32,6 +33,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--env-file", default=None, help="Path to deploy/cloud environment file")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # ---- research -------------------------------------------------------
+    research_p = sub.add_parser(
+        "research",
+        help="One-script research: declare exchange + features + strategy expectation, orchestrator pulls & runs",
+    )
+    research_p.add_argument("script", help="Path to the research script (.py with Research and Strategy classes)")
+    research_p.add_argument("--data-dir", default="", help="Feed data root (default: env QUANTLAB_DATA_ROOT or repo 'feeds')")
+    research_p.add_argument("--output-dir", default="", help="Output root (default: env QUANTLAB_OUTPUT_ROOT or repo research/results)")
+    research_p.add_argument("--build", action="store_true", help="Build the Runner DLL if missing")
+    research_p.add_argument("--no-pull", action="store_true", help="Fail if exchange data is not already staged (no auto-pull)")
+    research_p.add_argument("--job-only", action="store_true", help="Print the generated job JSON and exit (no pull / run)")
+    research_p.add_argument("--sample", type=float, nargs="?", const=600, default=0,
+                            help="Replay only the last N seconds of staged data (default when bare: 600); "
+                                 "ideal for quick idea iteration without replaying the whole window")
 
     # ---- run ------------------------------------------------------------
     run_p = sub.add_parser("run", help="Run a job locally or on the VM")
@@ -151,6 +167,21 @@ def _main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     env_file = args.env_file or str(DEFAULT_ENV)
     try:
+        if args.command == "research":
+            from . import research as _research
+
+            env = cloud.environment(env_file)
+            return _research.run(
+                args.script,
+                data_dir=args.data_dir,
+                output_dir=args.output_dir,
+                build=args.build,
+                no_pull=args.no_pull,
+                job_only=args.job_only,
+                sample_seconds=args.sample,
+                env=env,
+            )
+
         if args.command == "run":
             if args.where == "local":
                 if args.job is None:

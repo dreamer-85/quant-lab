@@ -95,6 +95,23 @@ namespace QuantConnect.Research.Engine.Replay
                 _lastProcessedTimestamp = evt.Timestamp;
                 eventsSinceLastObservation.Add(evt);
 
+                // Event-driven mode (no observation grid): emit one observation per event.
+                // The data itself advances the engine clock (Lean-style), so nothing is
+                // aggregated or collapsed — used by live streams and by replay jobs that
+                // want a per-event window instead of interval aggregation.
+                if (!_config.ObservationInterval.HasValue)
+                {
+                    yield return new ReplayResult
+                    {
+                        Timestamp = evt.Timestamp,
+                        State = currentState?.Clone(),
+                        Events = new List<MarketEvent> { evt },
+                        EventsProcessed = _eventsProcessed
+                    };
+                    eventsSinceLastObservation.Clear();
+                    continue;
+                }
+
                 // Check if we should emit an observation
                 if (nextObservationTime.HasValue && evt.Timestamp >= nextObservationTime.Value)
                 {

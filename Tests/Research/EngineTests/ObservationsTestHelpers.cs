@@ -37,5 +37,31 @@ namespace QuantConnect.Tests.Research.EngineTests
                 }
             };
         }
+
+        /// <summary>
+        /// Observation with two one-minute bars only (no trades/quotes).
+        /// </summary>
+        public static Observation CreateObservationWithBars()
+        {
+            var ts = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var state = new MarketState(_symbol);
+            var bars = new List<BarEvent>
+            {
+                new() { Timestamp = ts, Symbol = _symbol, Open = 99m, High = 105m, Low = 98m, Close = 103m, Volume = 10m, Period = TimeSpan.FromMinutes(1) },
+                new() { Timestamp = ts.AddMinutes(1), Symbol = _symbol, Open = 103m, High = 108m, Low = 101m, Close = 107m, Volume = 12m, Period = TimeSpan.FromMinutes(1) }
+            };
+
+            foreach (var bar in bars)
+            {
+                state.UpdateFromEvent(bar);
+            }
+
+            return new Observation
+            {
+                Timestamp = bars[^1].Timestamp,
+                State = state,
+                Events = new List<MarketEvent>(bars)
+            };
+        }
     }
 }

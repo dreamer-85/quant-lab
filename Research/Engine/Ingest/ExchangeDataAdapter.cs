@@ -56,10 +56,11 @@ namespace QuantConnect.Research.Engine.Ingest
                     $"\"archive\" sources are replayed by {nameof(Bybit.BybitArchiveSource)}, not the ExchangeDataAdapter");
             }
 
-            if (!_source.Provider.Equals("bybit", StringComparison.OrdinalIgnoreCase))
+            if (!_source.Provider.Equals("bybit", StringComparison.OrdinalIgnoreCase)
+                && !_source.Provider.Equals("binance", StringComparison.OrdinalIgnoreCase))
             {
                 throw new NotSupportedException(
-                    $"Provider \"{_source.Provider}\" is not supported; the adapter supports \"bybit\"");
+                    $"Provider \"{_source.Provider}\" is not supported; the adapter supports \"bybit\" and \"binance\"");
             }
 
             if (_source.Mode.Equals("live", StringComparison.OrdinalIgnoreCase) && _job.Reorder == ReorderMode.FullSort)
@@ -97,8 +98,20 @@ namespace QuantConnect.Research.Engine.Ingest
                 yield break;
             }
 
+            var isBinance = _source.Provider.Equals("binance", StringComparison.OrdinalIgnoreCase);
             if (_source.Mode.Equals("historical", StringComparison.OrdinalIgnoreCase))
             {
+                if (isBinance)
+                {
+                    // Binance REST backfill is staged by DataFeeds ("feed" mode); the adapter's
+                    // REST historical mode currently serves bybit only.
+                    foreach (var type in types)
+                    {
+                        yield return Enumerable.Empty<MarketEvent>();
+                    }
+                    yield break;
+                }
+
                 foreach (var type in types)
                 {
                     yield return HistoricalStream(type, job, symbol, _source, _http);
@@ -106,10 +119,29 @@ namespace QuantConnect.Research.Engine.Ingest
                 yield break;
             }
 
+            if (isBinance)
+            {
+                // Live: one shared connection, per-type queues. The Binance combined-stream
+                // connection needs no explicit subscribe message (the streams are in the URL).
+                var until = Binance.BinanceLiveSource.ResolveDeadline(job, _source);
+                var session = new Binance.BinanceLiveSession(
+                    Binance.BinanceApi.WsBase(_source),
+                    symbol,
+                    types,
+                    (int)Binance.BinanceApi.BarPeriodFor(job.Resolution).TotalMilliseconds,
+                    _wsFactory);
+                session.Start(Binance.BinanceLiveSource.BuildTopics(job, _source, symbol.Value));
+                foreach (var type in types)
+                {
+                    yield return session.Stream(type, until, CancellationToken.None);
+                }
+                yield break;
+            }
+
 // Live: one shared connection, per-type queues. The capture is optionally recorded to
 // an archive so it can be replayed deterministically later (see BybitArchiveSource).
-var until = Bybit.BybitLiveSource.ResolveDeadline(job, _source);
-var session = new Bybit.BybitLiveSession(
+var untilBybit = Bybit.BybitLiveSource.ResolveDeadline(job, _source);
+var sessionBybit = new Bybit.BybitLiveSession(
     Bybit.BybitApi.WsBase(_source),
     symbol,
     types,
@@ -117,11 +149,11 @@ var session = new Bybit.BybitLiveSession(
     (int)Bybit.BybitApi.PeriodFor(job.Resolution).TotalMilliseconds,
     _wsFactory,
     CreateArchive(_source));
-session.Start(Bybit.BybitLiveSource.BuildTopics(job, _source, symbol.Value));
+sessionBybit.Start(Bybit.BybitLiveSource.BuildTopics(job, _source, symbol.Value));
 
 foreach (var type in types)
 {
-    yield return session.Stream(type, until, CancellationToken.None);
+    yield return sessionBybit.Stream(type, untilBybit, CancellationToken.None);
 }
 }
 

@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="Parquet.Net" Version="4.0.2" />
+    <PackageReference Include="QuantConnect.pythonnet" Version="2.0.66" />
   </ItemGroup>
 
   <ItemGroup>
