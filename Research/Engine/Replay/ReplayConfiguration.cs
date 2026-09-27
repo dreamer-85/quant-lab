@@ -12,6 +12,19 @@ namespace QuantConnect.Research.Engine.Replay
         public DateTime StartTime { get; set; }
 
         /// <summary>
+        /// The point the observation grid is anchored to, i.e. every grid point is
+        /// <c>GridAnchor + n * ObservationInterval</c>. Null means <see cref="StartTime"/>.
+        ///
+        /// This is deliberately separate from <see cref="StartTime"/> because a resumed or chunked run
+        /// restarts partway through the window: its StartTime is the resume boundary (often one tick
+        /// past the last written observation), which is not a multiple of the interval away from the
+        /// original start. Anchoring the grid on the resume boundary would shift every subsequent grid
+        /// point by that remainder, so the tail would no longer line up with the run it is continuing.
+        /// A resumed run must pass the original job start here.
+        /// </summary>
+        public DateTime? GridAnchor { get; set; }
+
+        /// <summary>
         /// End time for replay
         /// </summary>
         public DateTime EndTime { get; set; }
@@ -36,6 +49,34 @@ namespace QuantConnect.Research.Engine.Replay
         /// Null means process all events without interval aggregation
         /// </summary>
         public TimeSpan? ObservationInterval { get; set; }
+
+        /// <summary>
+        /// Whether grid points that receive no new events are still emitted, carrying the previous
+        /// state forward. The analogue of Lean's <c>SecurityCache.CanFillForward</c>.
+        ///
+        /// When true (default) the observation sequence is gap-free and uniform in wall-clock time,
+        /// so a "20 period" rolling window means 20 x <see cref="ObservationInterval"/> of time
+        /// whether or not the feed was busy. Each such period is stamped
+        /// <see cref="Observations.DataQuality.Filled"/> so a filled period is never mistaken for a
+        /// real one.
+        ///
+        /// When false only periods that actually received events are emitted, which keeps the row
+        /// count proportional to the data but makes the observation series irregular: period
+        /// boundaries then follow data arrival, and a window covers an unpredictable amount of
+        /// time. Backtest and live runs of the same feed still agree, because both use the same
+        /// rule; they just no longer sit on a fixed clock.
+        /// </summary>
+        public bool FillForward { get; set; } = true;
+
+        /// <summary>
+        /// Hard ceiling on emitted observations (0 = unlimited).
+        ///
+        /// Exists because <see cref="FillForward"/> makes the row count a function of the clock
+        /// rather than the data: a 100ms interval over a wide window is millions of rows even for a
+        /// thin feed. Set this to bound a long window deliberately instead of discovering the cost
+        /// afterwards. Replay stops cleanly at the limit.
+        /// </summary>
+        public long MaxObservations { get; set; } = 0;
 
         /// <summary>
         /// Whether to preserve original event ordering
@@ -93,11 +134,14 @@ namespace QuantConnect.Research.Engine.Replay
             var components = new[]
             {
                 StartTime.ToString("O"),
+                (GridAnchor ?? StartTime).ToString("O"),
                 EndTime.ToString("O"),
                 string.Join(",", Symbols.Select(s => s.Value)),
                 string.Join(",", Venues),
                 string.Join(",", EventTypes.Select(e => e.ToString())),
                 ObservationInterval?.ToString() ?? "null",
+                FillForward.ToString(),
+                MaxObservations.ToString(),
                 PreserveOriginalOrdering.ToString(),
                 Reorder.ToString(),
                 MaxEvents.ToString(),
@@ -135,6 +179,9 @@ namespace QuantConnect.Research.Engine.Replay
 
             if (MaxEvents < 0)
                 result.Errors.Add("MaxEvents must be non-negative");
+
+            if (MaxObservations < 0)
+                result.Errors.Add("MaxObservations must be non-negative");
 
             return result;
         }

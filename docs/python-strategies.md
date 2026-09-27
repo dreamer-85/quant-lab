@@ -286,6 +286,8 @@ class Strategy:
 | `dataset`, `asset_class`, `venue` | str | job fields |
 | `resolution` | str | Lean resolution (`Minute`, …) |
 | `symbols`, `features`, `raw_fields`, `horizons` | list[str] | configured lists |
+| `history_periods` | int | periods of `observation["history"]` the job asked for (0 = off) |
+| `expose_events` | bool | whether `observation["events"]` is supplied |
 | `start`, `end` | str | ISO-8601 run window |
 | `observation_interval_seconds` | float | observation grid spacing |
 | `experiment_name` | str | always `python_strategy` |
@@ -302,19 +304,207 @@ Raw market fields (all present, `0.0` when absent):
 | --- | --- | --- |
 | `timestamp` | str | ISO-8601 observation time |
 | `symbol` | str | e.g. `BTCUSDT` |
-| `open`, `high`, `low`, `close` | float | period OHLC derived from the period's events, falling back to the market state's last price when a bar-only period yields nothing |
-| `volume`, `vwap` | float | traded volume / volume-weighted price |
+| `open`, `high`, `low`, `close` | float | period OHLC — see the note below |
+| `volume`, `vwap` | float | traded quantity / volume-weighted average price |
 | `trade_count`, `quote_count` | int | events seen since the previous observation |
+| `event_count` | int | **total** events in the period, every type |
+| `data_quality` | str | `fresh`, `filled` or `missing` — whether the period got new data — see below |
+| `is_filled` | bool | `True` when `data_quality` is `filled` |
+| `data_age_ms` | float | ms between the period and the newest event it reflects; `-1.0` if none seen |
+| `last_event_timestamp` | str | ISO-8601 of the newest event folded in; `None` if none seen |
 | `last_price`, `bid`, `ask`, `mid` | float | market state snapshot |
 | `spread`, `spread_bps` | float | top-of-book spread |
 | `bid_size`, `ask_size` | float | top-of-book size |
 | `bid_depth`, `ask_depth`, `depth_imbalance` | float | book depth / imbalance |
-| `bars` | list | `{timestamp, open, high, low, close, volume}` |
-| `trades` | list | `{timestamp, price, size, side, trade_id}`, `side` in `buy/sell/unknown` |
-| `quotes` | list | `{timestamp, bid_price, bid_size, ask_price, ask_size}` |
+| `bars` | list | `{type, timestamp, open, high, low, close, volume}` |
+| `trades` | list | `{type, timestamp, price, size, side, trade_id}`, `side` in `buy/sell/unknown` |
+| `quotes` | list | `{type, timestamp, bid_price, bid_size, ask_price, ask_size}` |
+| `orderbook` | list | `{type, timestamp, side, price, quantity, action, order_count}`, `side` in `bid`/`ask`, `action` in `add`/`modify`/`remove` |
+| `orderbook_snapshots` | list | `{type, timestamp, bids, asks, best_bid, best_ask, best_bid_size, best_ask_size, mid}` |
+| `custom_events` | list | `{type, timestamp, custom_type, value, data}` |
+| `events` | list | every event in stream order, each with a `type` — only when `expose_events` is on |
+| `bid_levels` | list | `{price, quantity}` for each reconstructed bid level, best first |
+| `ask_levels` | list | `{price, quantity}` for each reconstructed ask level, best first |
+| `raw` | dict | the raw fields the job requested — see below |
+| `history` | list | the previous `history_periods` periods for this symbol |
 
-`bars`/`trades`/`quotes` are only present when the job subscribed to that event
-type and at least one occurred in the period.
+Nested keys of the event dicts:
+
+- every book level — in `orderbook_snapshots[].bids`/`.asks` and in the
+  reconstructed `bid_levels`/`ask_levels` — is a pair of `price` and
+  `quantity`, best level first.
+- snapshot: `bids` and `asks` are those level lists. `best_bid`/`best_ask` are
+  the top prices, `best_bid_size`/`best_ask_size` their quantities, and `mid`
+  their average (0 when either side is empty).
+- custom: `type` is always the string `"custom"` — it is the event-*class*
+  discriminator, shared by every producer-defined event. The semantic label is
+  `custom_type` (`Liquidation`, `Funding`, `Auction`, …), `value` is its numeric
+  payload, and `data` is a pass-through dict of whatever extra keys the source
+  attached (absent when empty). Filter on `custom_type`, not on `type`.
+
+
+`event_count` is always present, including `0`. It is the honest total: it also
+counts events that appear in none of the per-type lists, so
+`len(trades) + len(quotes) + len(bars) + len(orderbook) < event_count` is a
+normal, meaningful state rather than a bug.
+
+The per-type lists are only present when the job subscribed to that event type
+and at least one occurred in the period. `orderbook_snapshots` and
+`custom_events` follow the same rule. `event_count` is how a script detects
+"something happened that I have no list for".
+
+Every event dict carries a `type` discriminator (`trade`, `quote`, `bar`,
+`orderbook_update`, `orderbook_snapshot`, or the lowercased enum name such as
+`funding`, `liquidation`, `auction`, `custom`). The `events` list is built from
+the same serializer as the per-type lists, so the two can never disagree.
+
+`order_count` is present only when the exchange published it. The field is
+nullable, and a null value is dropped at the boundary rather than sent as
+`None`, so always read it with `row.get("order_count")`.
+
+#### The `events` list
+
+Off by default because it duplicates the per-type lists and can be large on a
+busy book. Turn it on in the job:
+
+```json
+{ "scriptExposeEvents": true }
+```
+
+Use it when you need one ordered stream across types — for example, replaying
+trades and book updates in true arrival order, or counting how many events of
+each type landed in a period.
+
+#### `raw`: the fields the job asked for
+
+`raw` is a dict containing exactly the names in the job's `rawFields`, resolved
+the same way the observation CSV resolves them. `context["raw_fields"]` is
+therefore a real availability guarantee: every name in it is readable at
+`observation["raw"][name]`.
+
+```json
+{ "rawFields": ["bid_price", "ask_price", "depth", "trade_flow"] }
+```
+
+```python
+flow = observation["raw"]["trade_flow"]
+```
+
+Two rules worth knowing:
+
+- A name that collides with a computed **feature** is omitted from `raw`, because
+  the feature owns the column. The value is in `features[name]` instead. Preflight
+  reports the collision as an error, so a valid job never hits this.
+- Names are matched case-insensitively and trimmed, so `"Bid_Price"` and
+  `"bid_price"` both resolve. The dict is keyed by the name as the job wrote it.
+
+#### `history`: previous periods
+
+Set `scriptHistoryPeriods` in the job to receive the previous N periods for the
+current symbol, so a script can compute its own indicators instead of
+reimplementing a rolling window:
+
+```json
+{ "scriptHistoryPeriods": 20 }
+```
+
+```python
+closes = [row["close"] for row in observation["history"]] + [observation["close"]]
+sma = sum(closes) / len(closes)
+```
+
+- Oldest first, and **excludes the current period**.
+- Bounded to exactly N entries, so memory and marshalling cost are predictable.
+- Keyed per symbol: a multi-symbol job never leaks one symbol's periods into
+  another's window.
+- Each entry has `timestamp`, `data_quality`, `data_age_ms`, the OHLCV/VWAP/count
+  scalars, the state prices (`last_price`, `mid`, `bid`, `ask`, `spread`,
+  `bid_depth`, `ask_depth`), and every feature value for that period, keyed by
+  feature name. OHLC uses the same convention as the current period, so
+  `history[-1]["close"]` and the previous `observation["close"]` agree.
+- `0` (the default) omits the key entirely.
+
+Because the window is per symbol and excludes now, `len(history)` grows to N and
+stays there; use it to detect a cold start (`len(history) < N`).
+
+#### `data_quality`: which periods are real
+
+The observation grid is uniform in wall-clock time. The data is not. A period
+that receives no events still appears, carrying the previous state forward, and is
+stamped `filled`:
+
+```python
+if observation["data_quality"] != "fresh":
+    return                      # padding, not a measurement
+```
+
+This matters because a "20 period" window is 20 *periods*, not 20 intervals of
+time. If the feed is quieter than `observationInterval`, most of those 20
+periods are padding and the window quietly covers far more time than intended.
+Two ways to avoid that:
+
+- set `observationInterval` to the cadence the data actually has, so most
+  periods are `fresh`; or
+- set `fillForward: false`, which drops empty periods entirely. The series is then
+  irregular by design, and `data_quality` is `fresh` throughout.
+
+The engine reports the ratio itself: the `freshness` validation check warns when
+more than half of all periods are padding. `missing` means the period had no data
+*and* no prior state — the stream began after `startTime` — so those periods carry
+no market information at all.
+
+`last_event_timestamp` is never later than `timestamp`; the difference is
+`data_age_ms`. Both exist so a script can tell a real measurement from padding
+without inferring it from the numbers.
+
+
+### What is not in the payload
+
+Every event type the engine models is serialized and reachable: `Bar`, `Trade`,
+`Quote`, `OrderBookUpdate` and `OrderBookSnapshot` in their own lists, and every
+producer-defined event — `Funding`, `Liquidation`, `Auction` and any other — in
+`custom_events` under `custom_type`. Set `scriptExposeEvents` to also get one
+combined ordered `events` list. Consequences:
+
+- There is no cumulative state: `volume`, `trade_count` and `quote_count` are
+  strictly per-period, and `last_price`, `bid_depth` and `ask_depth` are
+  instantaneous. The engine keeps rolling windows internally (for features) and
+  hands the last N periods to the script via `history`, but it does not maintain
+  an unbounded series. A script that wants more than `scriptHistoryPeriods`
+  periods must accumulate it itself, as `docs/examples/python/sma_cross.py` does.
+- A custom event's `data` dict is passed through as-is, so its keys are whatever
+  the producing source chose. Read it with `.get()`.
+- A `null` field is dropped at the boundary rather than sent as `None`, so a key
+  being absent is how "not published" is expressed. This applies to nested dicts
+  too, hence `row.get("order_count")`.
+
+
+### `open`, `high`, `low` and `close`
+
+These four are the only keys the payload builder post-processes, and it does
+**not** simply copy `Observation`:
+
+- `open` — the **first** event's price if it is a trade, its mid if it is a
+  quote, its open if it is a bar, otherwise `0`
+- `close` — the same switch applied to the **last** event
+- `high` / `low` — max / min over the period's **trade** prices and **bar**
+  highs/lows only; quotes contribute nothing
+- then, for any of the four still `<= 0`, a fallback to the market state's
+  `last_price`
+
+So the fallback usually rescues a period that opens with a book update:
+`observation["open"]` is `0.0` only when the boundary event was not a
+trade/quote/bar **and** `last_price` is `0` — which is the case for a
+quote-only or book-only feed that has never seen a trade, or a null state.
+
+Two consequences still hold:
+
+- `open`/`close` may be a quote mid while `high`/`low` are trade prices, so
+  `low <= open <= high` is not guaranteed.
+- because of the fallback, `observation["open"]` can differ from the raw
+  `Observation.OpenPrice` the engine validates. A period the `observation`
+  validation check reports as `open = 0` may still show a non-zero `open` here.
+  Trust the payload, not the finding, when they disagree.
 
 `features` is `{feature_name: float}` for the features requested in the job
 (see [features.md](features.md)).
@@ -403,7 +593,16 @@ class Strategy:
 
 - **Return values are JSON-serialized** on the way back. Return plain Python
   values only (`float`/`int`/`str`/`bool`/`None`/`list`/`dict`). numpy scalars
-  must be unwrapped with `.item()`. Do not return `float('nan')`/infs in rows.
+  must be unwrapped with `.item()`.
+
+  `NaN` and `Infinity` are rejected before serialization, because neither is
+  valid JSON and both would otherwise reach the output as a silently corrupt
+  value: returning `float('nan')` raises `StrategyScriptException` naming the
+  offending row. Guard divisions yourself and return `None` or an explicit
+  sentinel instead.
+
+  This only applies to what the script returns. A Python value of `nan` that
+  stays inside the script is fine.
 
 - **Inputs are plain dicts.** `timestamp` values are ISO-8601 strings; prices
   are `float`. Decimals and `DateTime` are converted on the boundary.

@@ -20,12 +20,20 @@ case-insensitively, resolves physical data/output roots, and executes it.
 
   // Replay / observation
   "eventTypes": ["Trade", "Quote"],          // see MarketEventType
-  "observationInterval": "00:01:00",         // TimeSpan "c" format
+  "observationInterval": "00:01:00",         // TimeSpan "c" format; null = event-driven (one obs per event)
+  "fillForward": true,                       // emit periods that received no events, carrying state forward
+  "maxObservations": 0,                      // cap on observations per symbol; 0 = unlimited
+  "gridAnchor": null,                        // grid phase; inferred from the run's first chunk when null
   "maxEvents": 0,                            // 0 = unlimited
   "reorder": "FullSort",                     // FullSort | InOrderStreaming
 
   // Features to compute per observation (see features.md)
   "features": ["mid_price", "spread", "trade_volume"],
+
+  // Extra measurement columns appended to every observation row, and handed to a python
+  // script as observation["raw"]. Names come from the raw-field namespace (see features.md);
+  // matched case-insensitively. Default [].
+  "rawFields": ["bid_price", "ask_price", "depth", "trade_flow"],
 
   // Experiment + delayed labels
   "experimentName": "dry-run",               // REQUIRED (validation fails if empty)
@@ -34,6 +42,10 @@ case-insensitively, resolves physical data/output roots, and executes it.
   "experimentConfig": {},
   "strategyScript": "",                      // REQUIRED for python_strategy (absolute/.py path)
   "horizons": ["5m"],                        // optional delayed-label horizons (time-based)
+
+  // Python payload contract (python_strategy only; see python-strategies.md)
+  "scriptHistoryPeriods": 0,                 // previous periods per symbol as observation["history"]; 0 = off
+  "scriptExposeEvents": false,               // also supply observation["events"], one ordered list of all types
 
   // Output
   "outputFormat": "csv",                     // csv | json | parquet
@@ -52,9 +64,70 @@ Failing any of these throws `InvalidOperationException` (`Validate`):
 - at least one symbol
 - `startTime < endTime`
 - `observationInterval > 0`
+- `maxObservations` is `0` (no cap) or positive
+- `gridAnchor` requires `observationInterval` — without a grid there is no phase to anchor
 - `experimentName` non-empty
 - `strategyScript` non-empty when `experimentName` is `python_strategy` (full contract in
   [python-strategies.md](python-strategies.md))
+
+These are structural: they catch a job that cannot run at all. Whether the
+result is *correct* is a separate question, answered by the guardrail checks in
+[validation.md](validation.md), configured through `experimentConfig`:
+
+```json
+"experimentConfig": {
+  "validation.mode": "warn",
+  "validation.checks": "config,degenerate"
+}
+```
+
+Two cases abort regardless of `validation.mode`, because no useful output can
+exist: a `features` or `rawFields` entry that does not exist, and a
+`hypothesis` condition that measures something no feature can provide. Both
+report the closest valid name and the change to make.
+
+## The observation grid
+
+`observationInterval`, `fillForward` and `maxObservations` describe one thing:
+what the clock does when the data is not evenly spaced. They only make sense
+together, so they are documented as a set.
+
+Events are assigned to the first grid point at or after their timestamp, and
+the period stays open until the frontier moves past it, so every event landing
+in a period belongs to that period and the period is never stamped earlier than
+the newest data it contains.
+
+With `fillForward: true` (the default) a period that received no events is still
+emitted, carrying the previous period's state forward and stamped
+`data_quality=filled`. A period is then a fixed span of wall-clock time, so a
+20-period window always covers `20 * observationInterval` no matter how quiet
+the feed is. That is what makes a period count interpretable, and it is also
+the setting where padding can quietly dominate a result.
+
+With `fillForward: false` only periods containing data are emitted. Every
+observation is then a real measurement, but the series is irregular: a
+20-period window covers 20 *events*, not 20 intervals of time, so its span
+depends on the data. Choose this when period count is a proxy for sample size
+rather than for elapsed time.
+
+Set `observationInterval` to null for event-driven mode: one observation per
+event, no grid, and the data itself drives the clock.
+
+`maxObservations` bounds the period count when the grid is much finer than the
+data and the row count is set by the clock rather than by anything worth
+analysing. It is a budget for the whole run, not per segment: a resumed run
+spends only what the earlier segment left, so head plus tail still equals the
+cap. A run that stops on a limit reports it through the `coverage` check as a
+valid prefix, so a truncated file is never mistaken for a complete window.
+
+`gridAnchor` pins the phase of the grid. It is inferred from the effective start
+of the first chunk, which is what keeps a resumed run on the same grid as the
+run it continues; set it explicitly only to align runs that start at different
+times.
+
+Whichever combination you pick, the `freshness` and `coverage` checks report
+what the grid actually did rather than leaving you to infer it from the row
+count. See [validation.md](validation.md).
 
 ## Example: real Bybit BTCUSDT day (2161 events → 289 obs)
 
@@ -135,8 +208,9 @@ dotnet run --project Research\Runner -- --job-file docs\examples\hypothesis\job.
 
 `GetConfigurationHash()` (SHA-256) covers everything that changes the replay
 ground truth: dataset, symbols, asset class, venue, resolution, start/end
-times, event types, observation interval, features, experiment name, horizons,
-engine version, reorder mode, and `strategyScript` (for `python_strategy`).
+times, event types, observation interval, features, `rawFields`, experiment name,
+horizons, engine version, reorder mode, `strategyScript`,
+`scriptHistoryPeriods` and `scriptExposeEvents` (for `python_strategy`).
 `experimentConfig` is NOT hashed because it is filtered through the experiment;
 if a value in it feeds the hypothesis, set it in the script itself.
 

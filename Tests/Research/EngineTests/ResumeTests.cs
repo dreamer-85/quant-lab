@@ -136,6 +136,34 @@ namespace QuantConnect.Tests.Research.EngineTests
         [Test]
         public void Resume_ExecutorResume_HeadPlusTail_EqualsFull()
         {
+            AssertResumeParity(_ => { });
+        }
+
+        [Test]
+        public void Resume_FillForwardFalse_HeadPlusTail_EqualsFull()
+        {
+            // A resumed tail must not re-enable padding. The tail inherits the head's configuration
+            // explicitly, so a run with padding off stays irregular across the boundary instead of
+            // acquiring a uniform grid at the seam.
+            AssertResumeParity(job => job.FillForward = false);
+        }
+
+        [Test]
+        public void Resume_ObservationCap_HeadPlusTail_EqualsFull()
+        {
+            // The cap is a budget for the run, not for each segment. The head spends its share and the
+            // tail gets only the remainder, so head + tail is still exactly the cap rather than
+            // double-counting it at the seam.
+            AssertResumeParity(job => job.MaxObservations = 10, expectedTotalObservations: 10);
+        }
+
+        /// <summary>
+        /// Runs one resume scenario end to end and asserts the head plus the tail reproduce an
+        /// uninterrupted run exactly. Shared by the default, no-padding and capped variants so all
+        /// three prove the same parity property under different grid settings.
+        /// </summary>
+        private static void AssertResumeParity(Action<ResearchJob> configure, int? expectedTotalObservations = null)
+        {
             var source = MakeSource(400);
             var end = _start.AddSeconds(400 * 10 + 60);
             var job = new ResearchJob
@@ -156,6 +184,7 @@ namespace QuantConnect.Tests.Research.EngineTests
                 EnableCheckpointing = false,
                 Reorder = ReorderMode.InOrderStreaming
             };
+            configure(job);
 
             var rootA = Path.Combine(Path.GetTempPath(), "quantlab-resume-a-" + Guid.NewGuid().ToString("N")[..6]);
             var rootB = Path.Combine(Path.GetTempPath(), "quantlab-resume-b-" + Guid.NewGuid().ToString("N")[..6]);
@@ -171,12 +200,19 @@ namespace QuantConnect.Tests.Research.EngineTests
                 var fullRows = ReadRows(fullPath);
                 Assert.Greater(fullRows.Count, 0, "full run produced no rows");
 
+                if (expectedTotalObservations.HasValue)
+                {
+                    Assert.AreEqual(expectedTotalObservations.Value, fullRows.Count,
+                        "the cap must bound an uninterrupted run");
+                }
+
                 // Reference boundary snapshot from the SAME merged streams the executor consumes,
                 // so the persisted state is consistent with the events the resume leg will process.
                 var cfg = new ReplayConfiguration
                 {
                     StartTime = _start, EndTime = end,
                     Symbols = new() { _sBybit }, ObservationInterval = _interval,
+                    FillForward = job.FillForward, MaxObservations = job.MaxObservations,
                     Reorder = ReorderMode.InOrderStreaming
                 };
                 var stream = EventStreamMerger.Merge(source.GetEventStreams(job, _sBybit));
@@ -217,12 +253,16 @@ namespace QuantConnect.Tests.Research.EngineTests
                 // Provenance: the resume leg starts at the first observation AFTER the boundary,
                 // not from the beginning of the dataset.
                 Assert.Greater(tailRows.Count, 0, "resumed run produced no rows");
-                var firstTailTs = DateTime.Parse(tailRows[0].Timestamp);
-                Assert.AreEqual(boundary + _interval, firstTailTs, "first resumed observation time");
-
-                // The tail must exactly equal the full run's rows at timestamps after the boundary.
                 var fullAfter = fullRows.Where(r => DateTime.Parse(r.Timestamp) > boundary).ToList();
                 Assert.AreEqual(fullAfter.Count, tailRows.Count, "tail row count");
+
+                if (expectedTotalObservations.HasValue)
+                {
+                    Assert.AreEqual(expectedTotalObservations.Value, headCount + tailRows.Count,
+                        "the cap must bound the head and the tail together");
+                }
+
+                // The tail must exactly equal the full run's rows at timestamps after the boundary.
                 for (var i = 0; i < fullAfter.Count; i++)
                 {
                     Assert.AreEqual(fullAfter[i].Timestamp, tailRows[i].Timestamp, $"timestamp row {i}");
@@ -239,13 +279,35 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         private static List<(string Timestamp, string Mid, string Spread, string Volume)> ReadRows(string path) =>
-            File.ReadAllLines(path).Skip(1).Select(ParseRow).ToList();
+            ReadRowsByColumn(path, "timestamp", "mid_price", "spread", "trade_volume");
 
-        private static (string Timestamp, string Mid, string Spread, string Volume) ParseRow(string line)
+        /// <summary>
+        /// Reads the named columns by header name rather than by index, so adding a column to the
+        /// output cannot silently shift the values a test is comparing.
+        /// </summary>
+        private static List<(string Timestamp, string Mid, string Spread, string Volume)> ReadRowsByColumn(
+            string path, string timestamp, string mid, string spread, string volume)
         {
-            var parts = line.Split(',');
-            // CSV columns (alphabetical): job_id, mid_price, spread, symbol, timestamp, trade_volume
-            return (parts[4], parts[1], parts[2], parts[5]);
+            var lines = File.ReadAllLines(path);
+            var header = lines[0].Split(',');
+            var index = header
+                .Select((name, i) => (Name: name.Trim(), Index: i))
+                .ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var required in new[] { timestamp, mid, spread, volume })
+            {
+                Assert.IsTrue(index.ContainsKey(required), $"output is missing the '{required}' column: {lines[0]}");
+            }
+
+            return lines.Skip(1).Where(l => l.Length > 0).Select(line =>
+            {
+                var parts = line.Split(',');
+                return (
+                    parts[index[timestamp]],
+                    parts[index[mid]],
+                    parts[index[spread]],
+                    parts[index[volume]]);
+            }).ToList();
         }
     }
 }

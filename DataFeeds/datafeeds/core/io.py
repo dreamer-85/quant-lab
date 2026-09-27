@@ -27,7 +27,15 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .datatypes import BAR_HEADER, QUOTE_HEADER, TRADE_HEADER, Bar, Quote, Trade
+from .datatypes import (
+    BAR_HEADER,
+    BOOK_UPDATE_HEADER,
+    QUOTE_HEADER,
+    TRADE_HEADER,
+    Bar,
+    Quote,
+    Trade,
+)
 from .times import interval_label
 
 
@@ -96,6 +104,24 @@ def write_quotes(feed_root, market: str, provider: str, symbol: str, quotes) -> 
         QUOTE_HEADER,
         ordered,
         lambda q: [q.timestamp_ms, q.bid_price, q.bid_size, q.ask_price, q.ask_size],
+    )
+    return path, count
+
+
+def write_book_updates(feed_root, market: str, provider: str, symbol: str, book_updates) -> tuple[Path, int]:
+    """Writes sorted order book level changes to ``book_updates.csv``. Returns (path, count).
+
+    Note that no exchange REST endpoint in this toolchain serves *historical* L2
+    deltas, so this writer is fed by a websocket capture (or by hand) rather than
+    by a historical backfill. See ``providers/crypto/binance.py``.
+    """
+    ordered = sorted(book_updates, key=lambda u: u.timestamp_ms) if book_updates else []
+    path = symbol_dir(feed_root, market, provider, symbol) / "book_updates.csv"
+    count = _write_rows(
+        path,
+        BOOK_UPDATE_HEADER,
+        ordered,
+        lambda u: [u.timestamp_ms, u.side, u.price, u.quantity, u.action],
     )
     return path, count
 

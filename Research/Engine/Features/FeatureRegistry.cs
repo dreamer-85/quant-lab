@@ -155,9 +155,12 @@ namespace QuantConnect.Research.Engine.Features
             Register("ask_depth", () => new AskDepthFeature());
             Register("imbalance", () => new ImbalanceFeature());
             Register("depth_ratio", () => new DepthRatioFeature());
-            Register("liquidity_wall", () => new LiquidityWallFeature());
-            Register("resistance", () => new ResistanceFeature());
-            Register("structural_imbalance", () => new StructuralImbalanceFeature());
+            RegisterParameterized("structural_imbalance", p =>
+                new StructuralImbalanceFeature(p.GetDecimal("bps_band", 10m)));
+            RegisterParameterized("liquidity_wall", p =>
+                new LiquidityWallFeature(p.GetDecimal("wall_threshold_multiplier", 3m)));
+            RegisterParameterized("resistance", p =>
+                new ResistanceFeature(p.GetDecimal("resistance_factor", 2m)));
             Register("aggressive_buy_volume", () => new AggressiveBuyVolumeFeature());
             Register("aggressive_sell_volume", () => new AggressiveSellVolumeFeature());
             Register("net_flow", () => new NetFlowFeature());

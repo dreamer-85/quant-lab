@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Linq;
-using QuantConnect.Research.Engine.Events;
 using QuantConnect.Research.Engine.Observations;
 
 namespace QuantConnect.Research.Engine.Features
@@ -48,7 +47,10 @@ namespace QuantConnect.Research.Engine.Features
     /// </summary>
     public sealed class FeatureParameters
     {
-        private const string Prefix = "feature.";
+        /// <summary>
+        /// Configuration key prefix for per-feature parameters: "feature.&lt;featureName&gt;.&lt;parameterKey&gt;".
+        /// </summary>
+        public const string Prefix = "feature.";
 
         private readonly Dictionary<string, FeatureParams> _byName = new(StringComparer.OrdinalIgnoreCase);
 
@@ -117,7 +119,7 @@ namespace QuantConnect.Research.Engine.Features
             new MeasurementDescriptor("bid_depth", MeasurementKind.Raw, typeof(decimal), "Total order book depth on bid side", "state"),
             new MeasurementDescriptor("ask_depth", MeasurementKind.Raw, typeof(decimal), "Total order book depth on ask side", "state"),
             new MeasurementDescriptor("volume", MeasurementKind.Raw, typeof(decimal), "Traded volume since the previous observation", "events"),
-            new MeasurementDescriptor("trade_count", MeasurementKind.Raw, typeof(decimal), "Number of trades since the previous observation", "events"),
+            new MeasurementDescriptor("trade_count", MeasurementKind.Raw, typeof(int), "Number of trades since the previous observation", "events"),
             new MeasurementDescriptor("vwap", MeasurementKind.Raw, typeof(decimal), "Volume weighted average price of the period's trades", "events"),
             new MeasurementDescriptor("open_price", MeasurementKind.Raw, typeof(decimal), "Price at the start of the observation period", "events"),
             new MeasurementDescriptor("high_price", MeasurementKind.Raw, typeof(decimal), "Highest trade price in the observation period", "events"),
@@ -136,8 +138,11 @@ namespace QuantConnect.Research.Engine.Features
             if (observation == null)
                 throw new ArgumentNullException(nameof(observation));
 
+            // Preflight accepts raw field names case-insensitively, so resolution has to as well;
+            // otherwise "Bid_Price" passes validation and then throws here mid-replay.
+            var key = field?.Trim().ToLowerInvariant();
             var state = observation.State;
-            switch (field)
+            switch (key)
             {
                 case "symbol": return observation.State?.Symbol?.Value ?? string.Empty;
                 case "timestamp": return observation.Timestamp;
@@ -158,22 +163,7 @@ namespace QuantConnect.Research.Engine.Features
                 case "low_price": return observation.LowPrice;
                 case "close_price": return observation.ClosePrice;
                 case "trade_flow":
-                    decimal flow = 0m;
-                    if (observation.Events != null)
-                    {
-                        foreach (var evt in observation.Events)
-                        {
-                            if (evt is not TradeEvent trade)
-                                continue;
-                            flow += trade.Side switch
-                            {
-                                TradeSide.Buy => trade.Price * trade.Quantity,
-                                TradeSide.Sell => -(trade.Price * trade.Quantity),
-                                _ => 0m
-                            };
-                        }
-                    }
-                    return flow;
+                    return SignedNotionalFlow.Compute(observation.Events);
                 default:
                     throw new InvalidOperationException(
                         $"Unknown raw field '{field}'. Supported fields: {string.Join(", ", Names)}");

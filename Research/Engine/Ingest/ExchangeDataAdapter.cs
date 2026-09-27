@@ -104,12 +104,13 @@ namespace QuantConnect.Research.Engine.Ingest
                 if (isBinance)
                 {
                     // Binance REST backfill is staged by DataFeeds ("feed" mode); the adapter's
-                    // REST historical mode currently serves bybit only.
-                    foreach (var type in types)
-                    {
-                        yield return Enumerable.Empty<MarketEvent>();
-                    }
-                    yield break;
+                    // REST historical mode currently serves bybit only. Failing loudly beats
+                    // yielding empty streams, which surface downstream as a successful run
+                    // whose every column is constant zero.
+                    throw new NotSupportedException(
+                        "source.mode='historical' with source.provider='binance' is not supported: " +
+                        "the REST historical backfill serves bybit only. Use source.mode='feed' to stage " +
+                        "Binance data via DataFeeds, or source.provider='bybit'.");
                 }
 
                 foreach (var type in types)
@@ -135,6 +136,9 @@ namespace QuantConnect.Research.Engine.Ingest
                 {
                     yield return session.Stream(type, until, CancellationToken.None);
                 }
+
+                yield return LiveClockStream(job, until);
+
                 yield break;
             }
 
@@ -155,11 +159,43 @@ foreach (var type in types)
 {
     yield return sessionBybit.Stream(type, untilBybit, CancellationToken.None);
 }
+
+yield return LiveClockStream(job, untilBybit);
 }
 
-/// <summary>
-/// Creates the capture archive writer when the source requests one; null otherwise.
-/// </summary>
+        /// <summary>
+        /// The clock stream that keeps a live observation frontier moving through a quiet market.
+        ///
+        /// Skipped entirely when the job is event-driven, because with no grid there are no periods to
+        /// keep moving, and when the cadence is zero for the same reason. Emitted as one extra stream
+        /// alongside the per-type market streams so <see cref="EventStreamMerger"/> orders ticks
+        /// against real events by timestamp.
+        /// </summary>
+        private static IEnumerable<MarketEvent> LiveClockStream(ResearchJob job, DateTime? until)
+        {
+            if (!job.ObservationInterval.HasValue || job.ObservationInterval.Value <= TimeSpan.Zero)
+            {
+                return Enumerable.Empty<MarketEvent>();
+            }
+
+            // The grid phase must match the engine's, or a tick would close periods the engine has
+            // not opened yet. The engine infers the same anchor from the run's effective start.
+            var origin = job.GridAnchor ?? job.StartTime;
+            var from = DateTime.UtcNow > job.StartTime ? DateTime.UtcNow : job.StartTime;
+
+            return ObservationClockStream.Boundaries(
+                origin,
+                job.ObservationInterval.Value,
+                from,
+                until,
+                () => DateTime.UtcNow,
+                TimeSpan.FromMilliseconds(100),
+                CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Creates the capture archive writer when the source requests one; null otherwise.
+        /// </summary>
 private static Bybit.IWsFrameArchive CreateArchive(JobDataSource source)
 {
     return string.IsNullOrWhiteSpace(source?.ArchiveFilePath)

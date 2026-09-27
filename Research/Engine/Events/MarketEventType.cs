@@ -48,6 +48,13 @@ namespace QuantConnect.Research.Engine.Events
         /// <summary>
         /// Custom/user-defined event
         /// </summary>
-        Custom
+        Custom,
+
+        /// <summary>
+        /// A clock advance that carries no market data. Never delivered to a strategy or counted as
+        /// an event; it exists so a live frontier can move during a quiet market. See
+        /// <see cref="ClockTickEvent"/>.
+        /// </summary>
+        ClockTick
     }
 }

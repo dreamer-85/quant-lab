@@ -45,10 +45,28 @@ class Quote:
     ask_size: float
 
 
-FEED_TYPES = ("bars", "trades", "quotes")
+@dataclass(order=True)
+class BookUpdate:
+    """A single order book level change.
+
+    ``quantity`` is the new *absolute* size resting at ``price``, not a delta, and
+    ``0`` means the level was removed. ``side`` is ``"bid"``/``"ask"`` and
+    ``action`` is ``"add"``/``"modify"``/``"remove"`` (see
+    ``OrderBookUpdateAction`` in the engine).
+    """
+
+    timestamp_ms: int
+    side: str
+    price: float
+    quantity: float
+    action: str = "add"
+
+
+FEED_TYPES = ("bars", "trades", "quotes", "book_updates")
 """Kinds of data staged by a feed. Bar files are named ``bars_<seconds>.csv``."""
 
 # CSV columns in the order writers emit and the engine reads.
 BAR_HEADER = "timestamp_ms,open,high,low,close,volume"
 TRADE_HEADER = "timestamp_ms,price,size,side,trade_id"
 QUOTE_HEADER = "timestamp_ms,bid_price,bid_size,ask_price,ask_size"
+BOOK_UPDATE_HEADER = "timestamp_ms,side,price,quantity,action"

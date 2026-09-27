@@ -7,6 +7,7 @@ using QuantConnect.Research.Engine.MarketState;
 using QuantConnect.Research.Engine.Observations;
 using QuantConnect.Research.Engine.Replay;
 using QuantConnect.Research.Engine.Storage;
+using QuantConnect.Research.Engine.Validation;
 
 namespace QuantConnect.Research.Engine.Execution
 {
@@ -16,6 +17,12 @@ namespace QuantConnect.Research.Engine.Execution
     /// </summary>
     public class LocalResearchExecutor
     {
+        /// <summary>
+        /// Maximum number of findings echoed to the console. The full set is always written to
+        /// validation_report.json, so this only bounds console noise.
+        /// </summary>
+        private const int ConsoleFindingLimit = 20;
+
         private readonly IEventDataSource _dataSource;
         private readonly IDataStore _outputStore;
         private readonly Func<ResearchJob, IExperiment> _experimentFactory;
@@ -43,12 +50,32 @@ namespace QuantConnect.Research.Engine.Execution
         {
             var result = new LocalExecutionResult { JobId = job.JobId, StartTimeUtc = DateTime.UtcNow };
 
+            // Declared out here so the run metadata written after the try/catch can still describe
+            // the validation configuration, including for a run that failed before any check ran.
+            var validator = new ResearchValidator(ValidationOptions.FromJob(job));
+
             try
             {
                 if (!job.Validate(out var errors))
                 {
                     throw new InvalidOperationException($"Invalid job: {string.Join("; ", errors)}");
                 }
+
+                validator.Preflight(job);
+                if (validator.Enabled)
+                {
+                    Console.WriteLine($"Validation enabled: {string.Join(", ", validator.EnabledChecks)}");
+                }
+
+                // An unresolvable feature or raw field is not a suspicious result, it is a job that
+                // cannot run at all: FeatureEngine throws deep inside the per-symbol loop with a bare
+                // KeyNotFoundException. Fail here instead, where the suggestion from preflight is
+                // available, so the author sees the typo and the nearest real name.
+                ThrowIfFeaturesUnresolvable(job);
+
+                // The coverage check can only tell a complete window from a truncated one once it knows
+                // both the bounds that were requested and whether the grid was meant to pad up to them.
+                validator.SetRequestedWindow(job.StartTime, job.EndTime, job.ObservationInterval, job.FillForward);
 
                 var config = job.CreateReplayConfiguration();
                 IExperiment experiment = null;
@@ -98,14 +125,23 @@ namespace QuantConnect.Research.Engine.Execution
                         if (restored != null)
                         {
                             var resumeFrom = inProgress.LastObservationTimestamp.Value;
+                            observationsWritten = inProgress.ObservationsWritten;
                             runConfig = new Replay.ReplayConfiguration
                             {
                                 StartTime = resumeFrom.AddTicks(1),
+                                // The tail continues the original grid. Its own StartTime sits one tick
+                                // past the last written observation, which would shift every grid point
+                                // and stop the tail lining up with the run it continues.
+                                GridAnchor = config.StartTime,
                                 EndTime = config.EndTime,
                                 Symbols = config.Symbols,
                                 Venues = config.Venues,
                                 EventTypes = config.EventTypes,
                                 ObservationInterval = config.ObservationInterval,
+                                // Carried explicitly rather than inherited: the tail must pad and cap
+                                // exactly as the head did, or the two halves stop being one run.
+                                FillForward = config.FillForward,
+                                MaxObservations = RemainingBudget(config.MaxObservations, observationsWritten),
                                 MaxEvents = config.MaxEvents,
                                 EngineVersion = config.EngineVersion,
                                 Reorder = config.Reorder,
@@ -115,7 +151,6 @@ namespace QuantConnect.Research.Engine.Execution
                                     ? ResumeNextObservationTime(resumeFrom, config.ObservationInterval.Value, config.StartTime)
                                     : null
                             };
-                            observationsWritten = inProgress.ObservationsWritten;
                             Console.WriteLine($"Resuming {symbol.Value} from {resumeFrom:O} " +
                                               $"(events={inProgress.EventsProcessed}, obs={inProgress.ObservationsWritten})");
                         }
@@ -127,6 +162,7 @@ namespace QuantConnect.Research.Engine.Execution
                     var featureEngine = FeatureEngine.FromNames(
                         job.Features,
                         FeatureParameters.ParseJobConfig(job.ExperimentConfig));
+
 
                     using var outputStream = _outputStore.OpenWrite(outputPath);
                     using var writer = new ResearchOutputWriter(outputStream, job.OutputFormat);
@@ -147,13 +183,26 @@ namespace QuantConnect.Research.Engine.Execution
                         var row = featureResult.ToRow();
                         row["job_id"] = job.JobId;
                         row["symbol"] = symbol.Value;
+                        AddTrustColumns(row, observation);
+
+                        // Derived measurements take precedence over raw fields of the same name, matching
+                        // what MeasurementCatalog documents. A raw field that collides with a computed
+                        // feature is skipped rather than silently overwriting the feature's column; the
+                        // preflight check reports the collision so it is never a mystery.
                         if (job.RawFields != null)
                         {
                             foreach (var rawField in job.RawFields)
                             {
+                                if (featureResult.Values.ContainsKey(rawField))
+                                {
+                                    continue;
+                                }
+
                                 row[rawField] = RawFieldValues.For(observation, rawField);
                             }
                         }
+
+                        validator.OnObservation(observation, featureResult.Values, NumericColumns(row));
                         writer.WriteRow(row);
                         observationsWritten++;
                         result.ObservationsWritten++;
@@ -195,14 +244,34 @@ namespace QuantConnect.Research.Engine.Execution
                     {
                         // Labels whose horizon extends past the end of the stream cannot be resolved.
                         var unresolved = 0;
+                        var resolved = 0;
                         foreach (var resolver in resolvers)
                         {
                             resolver.Complete();
                             unresolved += resolver.UnresolvedCount;
+                            resolved += resolver.ResolutionCount;
                         }
                         if (unresolved > 0)
                         {
                             Console.WriteLine($"  ...{unresolved} unresolved label(s) for {symbol.Value} (horizon extends beyond data end)");
+
+                            // A high unresolved share means the horizon is longer than the data, or the
+                            // observations are further apart than the horizon assumes. Either way the
+                            // labels that did resolve are drawn from far fewer periods than expected.
+                            var total = unresolved + resolved;
+                            if (total > 0 && (double)unresolved / total > UnresolvedLabelRatioThreshold)
+                            {
+                                validator.Report.Add(new Validation.ValidationFinding
+                                {
+                                    Check = Validation.ValidationCheckIds.Coverage,
+                                    Severity = Validation.ValidationSeverity.Warning,
+                                    Symbol = symbol.Value,
+                                    Message =
+                                        $"{unresolved} of {total} delayed labels ({unresolved * 100d / total:F1}%) never resolved. " +
+                                        "A label is resolved by a later observation, so this means the horizon reaches past the " +
+                                        "end of the data, or the observation cadence is coarser than the horizon assumes."
+                                });
+                            }
                         }
                     }
                     else
@@ -220,6 +289,16 @@ namespace QuantConnect.Research.Engine.Execution
                     result.OutputFiles.Add(outputPath);
                     result.SymbolsProcessed++;
 
+                    validator.ObserveCoverage(
+                        replayEngine.FirstObservationTimestamp ?? job.StartTime,
+                        replayEngine.LastObservationTimestamp ?? job.StartTime,
+                        stats.ObservationsEmitted,
+                        stats.LateEvents,
+                        stats.Truncated);
+
+                    validator.Complete();
+                    validator.Reset();
+
                     checkpointManager?.Save(new ReplayCheckpoint
                     {
                         JobId = job.JobId,
@@ -231,6 +310,28 @@ namespace QuantConnect.Research.Engine.Execution
                         Completed = true,
                         CompletedAtUtc = DateTime.UtcNow
                     });
+                }
+
+                if (validator.Enabled)
+                {
+                    result.ValidationFindings = validator.Report.Findings.ToList();
+                    PersistValidationReport(job, validator);
+                    Console.WriteLine(validator.Report.Summarize());
+
+                    var reportable = validator.Report.Findings
+                        .Where(f => f.Severity != ValidationSeverity.Info)
+                        .ToList();
+                    foreach (var finding in reportable.Take(ConsoleFindingLimit))
+                    {
+                        Console.WriteLine("  " + finding);
+                    }
+
+                    if (reportable.Count > ConsoleFindingLimit)
+                    {
+                        Console.WriteLine($"  ... and {reportable.Count - ConsoleFindingLimit} more in validation_report.json");
+                    }
+
+                    validator.ThrowIfFatal();
                 }
 
                 if (experiment != null)
@@ -257,7 +358,153 @@ namespace QuantConnect.Research.Engine.Execution
             }
 
             result.EndTimeUtc = DateTime.UtcNow;
+
+            // Written for successful and failed runs alike: the point of the file is to record what
+            // the engine actually did, and a failed run is exactly when that matters most.
+            PersistRunMetadata(job, result, validator);
+
             return result;
+        }
+
+        /// <summary>
+        /// Writes run_metadata.json beside the run outputs. Everything needed to answer "what did
+        /// this run actually consume and produce?" without re-reading the job file: the resolved
+        /// source configuration, the subscriptions, the payload contract in force, and the counts
+        /// the run finished with. The job file alone cannot answer these, because defaults and
+        /// environment roots are resolved at run time.
+        /// </summary>
+        private void PersistRunMetadata(ResearchJob job, LocalExecutionResult result, ResearchValidator validator)
+        {
+            try
+            {
+                var directory = Path.Combine(ResolveOutputRoot(job), job.JobId);
+                _outputStore.CreateDirectory(directory);
+                var path = Path.Combine(directory, "run_metadata.json");
+
+                var source = job.Source;
+                var payload = new
+                {
+                    schemaVersion = 1,
+                    jobId = job.JobId,
+                    configurationHash = job.GetConfigurationHash(),
+                    succeeded = result.Succeeded,
+                    error = string.IsNullOrEmpty(result.Error) ? null : result.Error,
+                    engineVersion = job.EngineVersion,
+                    dataset = job.Dataset,
+                    assetClass = job.AssetClass,
+                    venue = job.Venue,
+                    resolution = job.Resolution.ToString(),
+                    symbols = job.Symbols,
+                    startTime = job.StartTime.ToString("O"),
+                    endTime = job.EndTime.ToString("O"),
+                    observationIntervalSeconds = job.ObservationInterval?.TotalSeconds,
+                fillForward = job.FillForward,
+                maxObservations = job.MaxObservations,
+                gridAnchor = job.GridAnchor?.ToString("O"),
+                    eventTypes = job.EventTypes.Select(e => e.ToString()).ToList(),
+                    features = job.Features,
+                    rawFields = job.RawFields,
+                    horizons = job.Horizons,
+                    experimentName = job.ExperimentName,
+                    strategyScript = job.StrategyScript,
+                    reorder = job.Reorder.ToString(),
+                    maxEvents = job.MaxEvents,
+                    enableCheckpointing = job.EnableCheckpointing,
+                    dataRoot = _environment.DataRoot,
+                    outputRoot = ResolveOutputRoot(job),
+                    source = source == null
+                        ? null
+                        : new
+                        {
+                            mode = string.IsNullOrWhiteSpace(source.Mode) ? "file" : source.Mode,
+                            provider = source.Provider,
+                            category = source.Category,
+                            orderBookDepth = source.OrderBookDepth,
+                            pageSize = source.PageSize,
+                            liveDurationSeconds = source.LiveDurationSeconds,
+                            restEndpoint = source.RestEndpoint,
+                            wsEndpoint = source.WsEndpoint,
+                            archiveFilePath = source.ArchiveFilePath
+                        },
+                    pythonContract = new
+                    {
+                        historyPeriods = job.ScriptHistoryPeriods,
+                        exposeEvents = job.ScriptExposeEvents
+                    },
+                    validation = new
+                    {
+                        enabled = validator.Enabled,
+                        mode = ValidationOptions.FromJob(job).Mode.ToString(),
+                        checks = validator.EnabledChecks,
+                        observationsChecked = validator.Report.ObservationsChecked,
+                        findingCount = validator.Report.Findings.Count
+                    },
+                    stats = new
+                    {
+                        eventsProcessed = result.EventsProcessed,
+                        observationsWritten = result.ObservationsWritten,
+                        symbolsProcessed = result.SymbolsProcessed,
+                        symbolsReused = result.SymbolsReused,
+                        outputFiles = result.OutputFiles
+                    },
+                    experiment = result.ExperimentResult == null
+                        ? null
+                        : new
+                        {
+                            name = result.ExperimentResult.ExperimentName,
+                            metrics = result.ExperimentResult.Metrics,
+                            metadata = result.ExperimentResult.Metadata
+                        },
+                    timing = new
+                    {
+                        startedAtUtc = result.StartTimeUtc.ToString("O"),
+                        finishedAtUtc = result.EndTimeUtc.ToString("O"),
+                        elapsedSeconds = result.Elapsed.TotalSeconds
+                    }
+                };
+
+                using var stream = _outputStore.OpenWrite(path);
+                using var textWriter = new StreamWriter(stream);
+                textWriter.Write(System.Text.Json.JsonSerializer.Serialize(payload, new System.Text.Json.JsonSerializerOptions
+                {
+                    WriteIndented = true
+                }));
+            }
+            catch (Exception ex)
+            {
+                // Metadata is an audit aid; failing to write it must not fail an otherwise good run.
+                Console.WriteLine($"  warning: could not write run_metadata.json: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Projects the numeric columns of an output row for validation. Identity columns (timestamp,
+        /// symbol, job_id) and any non-decimal value are excluded so the whole-run column checks only
+        /// see comparable quantities.
+        /// </summary>
+        private static Dictionary<string, decimal> NumericColumns(Dictionary<string, object> row)
+        {
+            var numeric = new Dictionary<string, decimal>(row.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var kvp in row)
+            {
+                switch (kvp.Value)
+                {
+                    case decimal value:
+                        numeric[kvp.Key] = value;
+                        break;
+                    case int intValue:
+                        numeric[kvp.Key] = intValue;
+                        break;
+                    case long longValue:
+                        numeric[kvp.Key] = longValue;
+                        break;
+                    case double doubleValue:
+                        numeric[kvp.Key] = (decimal)doubleValue;
+                        break;
+                }
+            }
+
+            return numeric;
         }
 
         /// <summary>
@@ -322,10 +569,32 @@ namespace QuantConnect.Research.Engine.Execution
         /// one horizon window (plus one for the triggering observation). A constant independent of the
         /// dataset size. Falls back to 0 (no cap) when there is no observation grid.
         /// </summary>
-        private static int MaxPendingFor(TimeSpan horizon, TimeSpan? observationInterval)
-        {
+        /// <summary>
+        /// Share of unresolved delayed labels above which the horizon is reported as inconsistent with
+        /// the data or the cadence.
+        /// </summary>
+        private const double UnresolvedLabelRatioThreshold = 0.25d;
+
+        private static int MaxPendingFor(TimeSpan horizon, TimeSpan? observationInterval)        {
             if (!observationInterval.HasValue || observationInterval.Value <= TimeSpan.Zero) return 0;
             return (int)Math.Ceiling(horizon.Ticks / (double)observationInterval.Value.Ticks) + 1;
+        }
+
+        /// <summary>
+        /// How much of <see cref="Replay.ReplayConfiguration.MaxObservations"/> a resumed tail may
+        /// still spend. The cap is a budget for the run, not for a segment of it, so a head that
+        /// already emitted its share leaves the tail the remainder and a run that hit the cap emits
+        /// nothing further. 0 (no cap) stays 0 rather than becoming a budget of zero.
+        /// </summary>
+        private static long RemainingBudget(long maxObservations, long alreadyEmitted)
+        {
+            if (maxObservations <= 0)
+            {
+                return 0;
+            }
+
+            var remaining = maxObservations - alreadyEmitted;
+            return remaining > 0 ? remaining : 0;
         }
 
         /// <summary>
@@ -337,8 +606,23 @@ namespace QuantConnect.Research.Engine.Execution
             {
                 Timestamp = replayResult.Timestamp,
                 State = replayResult.State as MarketState.MarketState,
-                Events = replayResult.Events ?? new List<MarketEvent>()
+                Events = replayResult.Events ?? new List<MarketEvent>(),
+                Quality = replayResult.Quality,
+                LastEventTimestamp = replayResult.LastEventTimestamp
             };
+        }
+
+        /// <summary>
+        /// Publishes how much of an observation is real, so a row says whether it is a measurement or
+        /// padding. Without these columns a filled period is indistinguishable from a live one in the
+        /// output, which is how a cadence mismatch stays invisible.
+        /// </summary>
+        private static void AddTrustColumns(Dictionary<string, object> row, Observation observation)
+        {
+            row[Validation.ObservationTrustColumns.Quality] = (int)observation.Quality;
+            row[Validation.ObservationTrustColumns.DataAgeMs] = observation.DataAge.HasValue
+                ? (decimal)observation.DataAge.Value.TotalMilliseconds
+                : -1m;
         }
 
         /// <summary>
@@ -385,6 +669,64 @@ namespace QuantConnect.Research.Engine.Execution
         }
 
         /// <summary>
+        /// Rejects a job that names a feature or raw field which does not exist. This is a
+        /// configuration mistake rather than a suspicious result, so it aborts regardless of
+        /// validation mode: the run could not produce meaningful output either way, and failing here
+        /// surfaces the "did you mean" guidance instead of a bare KeyNotFoundException from deep
+        /// inside the per-symbol replay loop.
+        /// </summary>
+        private static void ThrowIfFeaturesUnresolvable(ResearchJob job)
+        {
+            var problems = JobConfigurationCheck.UnresolvableNames(job);
+            if (problems.Count == 0)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"Job cannot run: {string.Join("; ", problems)}");
+        }
+
+        /// <summary>
+        /// Writes the validation report next to the run outputs so findings survive the console.
+        /// Written even when nothing was found, so a consumer can tell "validated clean" apart from
+        /// "validation did not run".
+        /// </summary>
+        private void PersistValidationReport(ResearchJob job, ResearchValidator validator)
+        {
+            var directory = Path.Combine(ResolveOutputRoot(job), job.JobId);
+            _outputStore.CreateDirectory(directory);
+            var path = Path.Combine(directory, "validation_report.json");
+
+            var payload = new
+            {
+                jobId = job.JobId,
+                configurationHash = job.GetConfigurationHash(),
+                mode = ValidationOptions.FromJob(job).Mode.ToString(),
+                checks = validator.EnabledChecks,
+                observationsChecked = validator.Report.ObservationsChecked,
+                raisedCounts = validator.Report.RaisedCounts,
+                findings = validator.Report.Findings.Select(f => new
+                {
+                    f.Check,
+                    severity = f.Severity.ToString(),
+                    f.Message,
+                    f.Symbol,
+                    f.Occurrences,
+                    firstTimestamp = f.FirstTimestamp?.ToString("O"),
+                    lastTimestamp = f.LastTimestamp?.ToString("O")
+                })
+            };
+
+            using var stream = _outputStore.OpenWrite(path);
+            using var textWriter = new StreamWriter(stream);
+            textWriter.Write(System.Text.Json.JsonSerializer.Serialize(payload, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true
+            }));
+        }
+
+        /// <summary>
         /// Persists experiment result rows and metrics through the output store
         /// </summary>
         private void PersistExperimentOutput(string path, ExperimentResult experimentResult, string format)
@@ -420,15 +762,27 @@ namespace QuantConnect.Research.Engine.Execution
         public long ObservationsWritten { get; set; }
         public List<string> OutputFiles { get; set; } = new();
         public ExperimentResult ExperimentResult { get; set; }
+
+        /// <summary>
+        /// Validation findings raised for this run, empty when validation is off.
+        /// </summary>
+        public List<ValidationFinding> ValidationFindings { get; set; } = new();
         public DateTime StartTimeUtc { get; set; }
         public DateTime EndTimeUtc { get; set; }
         public TimeSpan Elapsed => EndTimeUtc - StartTimeUtc;
 
         public override string ToString()
         {
-            return Succeeded
-                ? $"Job {JobId}: OK, {SymbolsProcessed} symbols (+{SymbolsReused} reused), {EventsProcessed} events, {ObservationsWritten} observations in {Elapsed.TotalSeconds:F1}s"
-                : $"Job {JobId}: FAILED - {Error}";
+            if (!Succeeded)
+            {
+                return $"Job {JobId}: FAILED - {Error}";
+            }
+
+            var validation = ValidationFindings.Count == 0
+                ? string.Empty
+                : $", {ValidationFindings.Count} validation finding(s)";
+            return $"Job {JobId}: OK, {SymbolsProcessed} symbols (+{SymbolsReused} reused), " +
+                   $"{EventsProcessed} events, {ObservationsWritten} observations{validation} in {Elapsed.TotalSeconds:F1}s";
         }
     }
 }

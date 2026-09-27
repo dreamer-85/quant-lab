@@ -4,17 +4,57 @@ using QuantConnect.Research.Engine.Observations;
 namespace QuantConnect.Research.Engine.Features
 {
     /// <summary>
-    /// Trade flow feature. Cumulative signed volume in the observation period.
+    /// Single source of truth for signed trade flow, shared by the derived <c>trade_flow</c> feature,
+    /// the derived <c>net_flow</c> feature and the raw <c>trade_flow</c> field so all three agree by
+    /// construction. See <see cref="SignedNotionalFlow"/>.
+    /// </summary>
+    internal static class SignedNotionalFlow
+    {
+        /// <summary>
+        /// Signed notional flow over a period's trades: +price*quantity for taker buys, -price*quantity
+        /// for taker sells, 0 for trades with an unknown side. Positive implies net buying pressure.
+        /// </summary>
+        public static decimal Compute(IEnumerable<MarketEvent> events)
+        {
+            decimal flow = 0m;
+            if (events == null)
+            {
+                return flow;
+            }
+
+            foreach (var evt in events)
+            {
+                if (evt is not TradeEvent trade)
+                {
+                    continue;
+                }
+
+                flow += trade.Side switch
+                {
+                    TradeSide.Buy => trade.Price * trade.Quantity,
+                    TradeSide.Sell => -(trade.Price * trade.Quantity),
+                    _ => 0m
+                };
+            }
+
+            return flow;
+        }
+    }
+
+    /// <summary>
+    /// Trade flow feature. Signed notional flow in the observation period.
     /// Positive flow implies buying pressure, negative implies selling pressure.
+    /// Numerically identical to the raw <c>trade_flow</c> field and to <see cref="NetFlowFeature"/>;
+    /// trades with an unknown side contribute nothing, so a period with no side information yields 0.
     /// </summary>
     public class TradeFlowFeature : FeatureBase
     {
         public override string Name => "trade_flow";
-        public override string Description => "Cumulative volume in observation period (positive = buying)";
+        public override string Description => "Signed notional flow in observation period (+buy, -sell)";
 
         public override decimal Compute(Observation observation, FeatureContext context)
         {
-            return observation.Volume;
+            return SignedNotionalFlow.Compute(observation?.Events);
         }
     }
 
@@ -139,7 +179,8 @@ namespace QuantConnect.Research.Engine.Features
 
     /// <summary>
     /// Net aggressive flow feature. Aggressive buy notional minus aggressive sell notional in the
-    /// current observation period. Positive = net buying pressure.
+    /// current observation period. Positive = net buying pressure. An alias of <see cref="TradeFlowFeature"/>:
+    /// both name the same signed notional flow.
     /// </summary>
     public class NetFlowFeature : FeatureBase
     {
@@ -148,27 +189,7 @@ namespace QuantConnect.Research.Engine.Features
 
         public override decimal Compute(Observation observation, FeatureContext context)
         {
-            decimal net = 0m;
-            if (observation.Events == null)
-                return net;
-
-            foreach (var evt in observation.Events)
-            {
-                if (evt is not TradeEvent trade)
-                    continue;
-
-                switch (trade.Side)
-                {
-                    case TradeSide.Buy:
-                        net += trade.Price * trade.Quantity;
-                        break;
-                    case TradeSide.Sell:
-                        net -= trade.Price * trade.Quantity;
-                        break;
-                }
-            }
-
-            return net;
+            return SignedNotionalFlow.Compute(observation?.Events);
         }
     }
 }

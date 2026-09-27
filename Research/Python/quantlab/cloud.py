@@ -446,6 +446,11 @@ def run_local_dict(
         job_id=str(payload.get("jobId", "")),
         strategy_script=str(payload.get("strategyScript", "")),
         raw_fields=[str(f) for f in payload.get("rawFields", [])],
+        fill_forward=bool(payload.get("fillForward", True)),
+        max_observations=int(payload.get("maxObservations", 0)),
+        grid_anchor=(
+            None if payload.get("gridAnchor") is None else str(payload.get("gridAnchor"))
+        ),
         source=dict(payload.get("source", {}) or {}),
     )
     if output_dir:
@@ -510,6 +515,11 @@ def compare_local_cloud(
     ``manifest.json`` fields are compared field-by-field; the output files are
     byte-compared via their hash (``deep_parquet`` additionally loads both with
     pandas and compares frame equality, requiring pandas + pyarrow).
+
+    ``manifest.json`` and ``run_metadata.json`` are excluded from the file
+    comparison: the first is the comparison surface itself, and the second is a
+    run-local audit record whose absolute paths and timings are expected to
+    differ between two runs of the same job.
     """
     lm = _manifest(local)
     cm = _manifest(cloud)
@@ -527,8 +537,12 @@ def compare_local_cloud(
     c_dir = Path(cloud) if Path(cloud).is_dir() else Path(cloud).parent
     l_files = sorted(l_dir.rglob("*")) if compare_files else []
     c_files = sorted(c_dir.rglob("*")) if compare_files else []
-    l_files = [f for f in l_files if f.is_file() and f.name != "manifest.json"]
-    c_files = [f for f in c_files if f.is_file() and f.name != "manifest.json"]
+    # manifest.json is the comparison surface itself, and run_metadata.json is a run-local audit
+    # record (absolute roots, wall-clock timing) that is expected to differ between a local and a
+    # cloud run of the same job. Neither is a result, so neither is byte-compared.
+    excluded = {"manifest.json", "run_metadata.json"}
+    l_files = [f for f in l_files if f.is_file() and f.name not in excluded]
+    c_files = [f for f in c_files if f.is_file() and f.name not in excluded]
     if l_files or c_files:
         if len(l_files) != len(c_files):
             mismatches.append(f"file count: local={len(l_files)} cloud={len(c_files)}")

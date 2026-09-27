@@ -27,6 +27,31 @@ namespace QuantConnect.Research.Engine.Jobs
         /// aggregated). A positive value emits observations on a time grid over the events.
         /// </summary>
         public TimeSpan? ObservationInterval { get; set; } = TimeSpan.FromMilliseconds(100);
+
+        /// <summary>
+        /// Whether a period on the observation grid that receives no events is still emitted,
+        /// carrying the previous period's state forward and stamped
+        /// <see cref="Observations.DataQuality.Filled"/>. On by default, because a rolling window
+        /// of N periods then covers a predictable span of wall-clock time regardless of how quiet
+        /// the feed is. Set false to emit only periods that actually contain data, which makes the
+        /// series irregular and every period <see cref="Observations.DataQuality.Fresh"/>.
+        /// </summary>
+        public bool FillForward { get; set; } = true;
+
+        /// <summary>
+        /// Hard cap on the number of observations emitted per symbol. 0 means no cap. Useful when the
+        /// grid is much finer than the data, where the natural period count is set by the clock
+        /// rather than by anything worth analysing.
+        /// </summary>
+        public long MaxObservations { get; set; } = 0;
+
+        /// <summary>
+        /// Phase of the observation grid. The engine infers the phase from the effective start of
+        /// the first chunk, so a resumed run lands on the same grid as the run it is continuing;
+        /// set this only to pin a grid across runs that start at different times.
+        /// </summary>
+        public DateTime? GridAnchor { get; set; }
+
         public List<string> Features { get; set; } = new();
         public string ExperimentName { get; set; } = string.Empty;
         public Dictionary<string, string> ExperimentConfig { get; set; } = new();
@@ -48,6 +73,22 @@ namespace QuantConnect.Research.Engine.Jobs
         /// directly from the observation state and can be of mixed types (decimal, long, DateTime, string).
         /// </summary>
         public List<string> RawFields { get; set; } = new();
+
+        /// <summary>
+        /// Number of previous observation periods (per symbol) to hand a Python strategy as
+        /// <c>observation["history"]</c>, oldest first and excluding the current period. Lets a
+        /// script compute its own indicators without reimplementing a rolling window. 0 disables it.
+        /// </summary>
+        public int ScriptHistoryPeriods { get; set; } = 0;
+
+        /// <summary>
+        /// When true, a Python strategy also receives <c>observation["events"]</c>: every event in
+        /// the period in stream order, each tagged with a "type" discriminator. Off by default
+        /// because it duplicates the per-type lists (<c>trades</c>, <c>orderbook</c>, ...) and can
+        /// be large on a busy book. Custom events (Funding/Liquidation/Auction) are always exposed
+        /// through <c>custom_events</c> regardless of this flag.
+        /// </summary>
+        public bool ScriptExposeEvents { get; set; }
         public string EngineVersion { get; set; } = "1.0.0";
         public long MaxEvents { get; set; } = 0;
         public bool EnableCheckpointing { get; set; } = true;
@@ -80,6 +121,9 @@ namespace QuantConnect.Research.Engine.Jobs
                 Venues = string.IsNullOrEmpty(Venue) ? new List<string>() : new List<string> { Venue },
                 EventTypes = EventTypes,
                 ObservationInterval = ObservationInterval,
+                FillForward = FillForward,
+                MaxObservations = MaxObservations,
+                GridAnchor = GridAnchor,
                 MaxEvents = MaxEvents,
                 EngineVersion = EngineVersion,
                 Reorder = Reorder
@@ -116,10 +160,15 @@ namespace QuantConnect.Research.Engine.Jobs
                 EndTime.ToString("O"),
                 string.Join(",", EventTypes.Select(e => e.ToString())),
                 ObservationInterval?.ToString() ?? "null",
+                FillForward.ToString(),
+                MaxObservations.ToString(),
+                GridAnchor?.ToString("O") ?? "null",
                 string.Join(",", Features),
                 ExperimentName,
                 string.Join(",", Horizons),
                 string.Join(",", RawFields),
+                ScriptHistoryPeriods.ToString(),
+                ScriptExposeEvents.ToString(),
                 EngineVersion,
                 Reorder.ToString(),
                 StrategyScript,
@@ -160,6 +209,12 @@ namespace QuantConnect.Research.Engine.Jobs
 
             if (ObservationInterval.HasValue && ObservationInterval.Value <= TimeSpan.Zero)
                 errors.Add("ObservationInterval must be positive");
+
+            if (MaxObservations < 0)
+                errors.Add("MaxObservations must be zero (no cap) or positive");
+
+            if (GridAnchor.HasValue && !ObservationInterval.HasValue)
+                errors.Add("GridAnchor requires ObservationInterval: without a grid there is no phase to anchor");
 
             if (string.IsNullOrEmpty(ExperimentName))
                 errors.Add("Experiment name is required");

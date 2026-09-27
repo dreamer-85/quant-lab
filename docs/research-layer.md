@@ -7,6 +7,17 @@ state reconstruction, provenance, checkpointing, bounded memory, and the
 observation grid. Nothing in `MarketEvent` or `Observation` was changed to carry
 research concepts; research is derived data computed **from** observations.
 
+Because the engine owns the observation clock, every research answer inherits it.
+A condition measured at period *N* means what it means only if the grid that
+produced *N* is trustworthy, so the engine publishes that trust explicitly —
+`data_quality` and `data_age_ms` on every row, `last_event_timestamp` in the
+Python payload, and the `grid`, `freshness` and `coverage` checks that report
+when the clock and the data disagree. A "20 period" window is 20 periods of
+wall-clock time, not 20 intervals of data, unless `fillForward` is off; that
+distinction is a property of the data, so the engine reports it rather than
+leaving each result to assume it. See [validation.md](validation.md) for the
+checks and [research-job.md](research-job.md) for the grid settings.
+
 A runnable example lives at `docs/examples/hypothesis/`:
 
 ```
@@ -27,6 +38,51 @@ The experiment output lands at `<output-dir>/<jobId>/experiment/hypothesis.csv`
 (signal rows with `ret_o{1,5,20}` / `resolved_o{1,5,20}`) next to a
 `hypothesis_metrics.json` (trigger count, per-horizon count / mean return /
 up rate / continuation rate).
+
+### Run layout
+
+```
+<output-dir>/<jobId>/
+  manifest.json             runner summary: the local/cloud parity surface for `quantlab compare`
+  run_metadata.json         what the run consumed and produced (always written)
+  validation_report.json    validation findings (only when validation is enabled)
+  checkpoints/              replay checkpoints, when enableCheckpointing is on
+  BTCUSDT/
+    crypto.parquet          observation rows (features + rawFields columns)
+  experiment/
+    python_strategy.csv           rows returned by the script
+    python_strategy_metrics.json  metrics the script returned
+```
+
+`manifest.json` and `run_metadata.json` overlap on purpose and are not
+interchangeable. `manifest.json` is the small, stable field set that
+`quantlab compare` checks between a local and a cloud run, so it holds only
+values that must match. `run_metadata.json` is the audit record and deliberately
+includes things that *cannot* match — absolute roots, output paths, wall-clock
+timing — which is why `quantlab compare` excludes it from byte comparison
+alongside `manifest.json`. Do not put run-local detail in `manifest.json`: it
+would report a false parity failure.
+
+`run_metadata.json` is written whether the run succeeded or failed. The job file
+alone cannot answer "what did this actually consume?", because defaults,
+environment roots and the resolved source configuration are settled at run time.
+It records:
+
+- `jobId`, `configurationHash`, `succeeded`, `error`, `engineVersion`
+- the resolved window: `symbols`, `startTime`, `endTime`, `resolution`,
+  `observationIntervalSeconds`, `fillForward`, `maxObservations`, `gridAnchor`,
+  `eventTypes`, `features`, `rawFields`, `horizons`
+- `dataRoot` / `outputRoot` actually used, and the resolved `source` block
+  (`mode`, `provider`, `orderBookDepth`, `pageSize`, endpoints, archive path) —
+  which is how you tell a `feed` run from a `live` one after the fact
+- `pythonContract` (`historyPeriods`, `exposeEvents`): the payload contract the
+  script ran under
+- `validation` (enabled, mode, checks, observation count, finding count)
+- `stats` (`eventsProcessed`, `observationsWritten`, `symbolsProcessed`,
+  `symbolsReused`, `outputFiles`), `experiment` (name, metrics, metadata) and
+  `timing`
+
+`schemaVersion` is `1` and will be bumped if the shape changes.
 
 ---
 
@@ -53,7 +109,7 @@ request today, unified from two existing namespaces:
 
 - **derived** measurements — the feature registry (`job.Features`), computed per
   observation through the feature engine;
-- **raw** fields — `RawFieldValues` (mid price, depth, volatility, vwap, ...),
+- **raw** fields — `RawFieldValues` (mid price, depth, vwap, trade count, ...),
   read directly off the observation / market state.
 
 Each entry is a `MeasurementDescriptor`: `Name`, `Kind` (Raw/Derived), `ValueType`,
@@ -63,33 +119,70 @@ actually contains. `MeasurementCatalog.Get(name)` throws a helpful
 `KeyNotFoundException` listing the available measurements; the catalog never
 invents a measurement the observation cannot provide.
 
+The raw namespace is exactly the 19 fields in `RawFieldValues.Descriptors`:
+`symbol`, `timestamp`, `mid_price`, `bid_price`, `ask_price`, `last_price`,
+`spread`, `spread_bps`, `depth`, `bid_depth`, `ask_depth`, `volume`,
+`trade_count`, `vwap`, `open_price`, `high_price`, `low_price`, `close_price`,
+`trade_flow`. There is no `volatility` raw field; compute realized volatility
+yourself in an experiment if you need it.
+
+Raw field values are types, not just numbers: `trade_count` is an `int` and
+`symbol`/`timestamp` are `string`/`DateTime`. Only decimal-valued fields become
+numeric output columns.
+
 ## 2. Derived measurements & the dependency model
 
 A derived measurement can declare inputs via `IFeature.Dependencies`
 (`FeatureBase` returns an empty list by default). `FeatureEngine` then:
 
 1. expands the job's selected features to their **transitive dependency closure**
-   (`FromNames`), so selecting `liquidity_depletion` automatically pulls in
-   everything it reads;
+   (`FromNames`), so selecting a feature that declares dependencies automatically
+   pulls in everything it reads;
 2. orders computation with a stable topological sort — dependencies always
-   precede their dependents, cycles and references to unselected measurements are
-   rejected with a clear error;
+   precede their dependents, and cycles are rejected with a clear error;
 3. exposes each computed value on `FeatureContext.CurrentMeasurements`, so a
    derived feature reads its inputs with `HasMeasurement`/`GetMeasurement` instead
    of recomputing the underlying math.
 
-`liquidity_wall`, `resistance` and `structural_imbalance` are the built-in
-derived-from-derived examples; compute stays a pure function of already-measured
-values, so causality is preserved mechanically.
+**No built-in feature currently declares a dependency.** Every feature in the
+registry reads the observation and reconstructed market state directly, so
+`Dependencies` is empty for all 21 of them and the closure in step 1 is a no-op
+for stock jobs. The mechanism exists for custom and future features, and is
+covered by `FeatureDependencyTests`, but do not assume selecting a built-in
+feature computes some other built-in feature as a side effect.
+
+Where built-in features look related, they are independent computations over the
+same state, not a pipeline. `liquidity_wall`, `resistance` and
+`structural_imbalance` each walk the book levels themselves; none of them reads
+`depth` or `imbalance`.
+
+Data dependencies that *do* exist are about inputs, not features: a depth
+feature needs order book data, and without it returns `0` for every observation.
+The `config` validation check reports that as an error rather than letting a
+constant-zero column pass as a result.
 
 ## 3. Conditions separate "fire" from "measure"
 
 `MeasurementCondition` parses `"measurement operator threshold"`
 (e.g. `imbalance < -0.50`) with operators `< <= > >= == !=` and evaluates over a
-measurement-value dictionary (`FeatureResult.Values`). A condition silently does
-not fire when its measurement is absent — the job must select it via
-`job.Features`. It is deliberately a tiny string grammar, not a general
-expression engine: hypotheses stay one-decision-per-condition.
+measurement-value dictionary (`FeatureResult.Values`). It is deliberately a tiny
+string grammar, not a general expression engine: hypotheses stay
+one-decision-per-condition.
+
+A condition whose measurement is not in `FeatureResult.Values` never fires, so
+the two failure modes are distinct and both matter:
+
+- the job did not select a measurement that **is** a registered feature — a
+  mistake, reported by the `config` validation check as an error that names the
+  missing feature and the exact job change to make;
+- the measurement is a **raw field** (`trade_count`, `vwap`, `open_price`, ...)
+  rather than a feature — also an error, because conditions only see feature
+  values and a raw field cannot be added to `job.features` to fix it. The check
+  says so, instead of suggesting a change that would fail the run.
+
+Before this check existed, both cases produced an empty experiment output and a
+successful run, which reads as "the hypothesis was rejected" rather than "the
+condition was impossible". See `validation.md`.
 
 ## 4. Current observation vs future outcome
 

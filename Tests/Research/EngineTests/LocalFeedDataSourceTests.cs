@@ -282,5 +282,24 @@ namespace QuantConnect.Tests.Research.EngineTests
             Assert.That(rows.Any(r => (bool)r["resolved_o1"]), Is.True);
             Assert.That(rows.Where(r => (bool)r["resolved_o1"]).All(r => (decimal)r["ret_o1"] > 0m), Is.True);
         }
+
+        /// <summary>
+        /// A 'historical' + binance job used to yield empty event streams, which surfaced as a
+        /// successful run whose every column was constant zero. It must fail with actionable text.
+        /// </summary>
+        [Test]
+        public void Historical_Binance_FailsLoudly_InsteadOfYieldingNoEvents()
+        {
+            var job = BuildJob();
+            job.Source = new JobDataSource { Mode = "historical", Provider = "binance" };
+
+            var source = new ExchangeDataAdapter(job, job.Source);
+
+            var error = Assert.Throws<NotSupportedException>(
+                () => EventStreamMerger.Merge(source.GetEventStreams(job, _symbol)).ToList());
+
+            Assert.That(error!.Message, Does.Contain("feed"));
+            Assert.That(error.Message, Does.Contain("bybit"));
+        }
     }
 }

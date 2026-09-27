@@ -25,6 +25,32 @@ namespace QuantConnect.Research.Engine.Observations
         public List<MarketEvent> Events { get; set; } = new();
 
         /// <summary>
+        /// Whether this period received fresh data or carried the previous state forward.
+        /// See <see cref="Observations.DataQuality"/>.
+        /// </summary>
+        public DataQuality Quality { get; set; } = DataQuality.Fresh;
+
+        /// <summary>
+        /// Timestamp of the newest event incorporated into this observation, or null when no event
+        /// has been observed yet. Never greater than <see cref="Timestamp"/>: an observation can
+        /// never contain data from its own future. The difference is the observation's data age and
+        /// is the honest measure of how stale the state is when the grid runs ahead of the feed.
+        /// </summary>
+        public DateTime? LastEventTimestamp { get; set; }
+
+        /// <summary>
+        /// True when this period carried the previous state forward with no new events.
+        /// </summary>
+        public bool IsFilled => Quality == DataQuality.Filled;
+
+        /// <summary>
+        /// Wall-clock age of the state at this observation, or null when no event has been seen.
+        /// </summary>
+        public TimeSpan? DataAge => LastEventTimestamp.HasValue
+            ? Timestamp - LastEventTimestamp.Value
+            : (TimeSpan?)null;
+
+        /// <summary>
         /// Number of trades since last observation
         /// </summary>
         public int TradeCount => Events.Count(e => e.EventType == MarketEventType.Trade);
@@ -107,7 +133,9 @@ namespace QuantConnect.Research.Engine.Observations
             {
                 Timestamp = Timestamp,
                 State = State?.CloneTyped(),
-                Events = Events.Select(e => e.Clone()).ToList()
+                Events = Events.Select(e => e.Clone()).ToList(),
+                Quality = Quality,
+                LastEventTimestamp = LastEventTimestamp
             };
         }
     }

@@ -146,7 +146,7 @@ namespace QuantConnect.Research.Engine.Features
             _wallThresholdMultiplier = wallThresholdMultiplier;
         }
 
-        public override string Name => "liquidity_wall";
+        public override string Name => $"liquidity_wall_{_wallThresholdMultiplier}x";
         public override string Description => $"Distance (bps) to nearest liquidity wall (qty > {_wallThresholdMultiplier}x typical)";
 
         public override decimal Compute(Observation observation, FeatureContext context)
@@ -197,7 +197,7 @@ namespace QuantConnect.Research.Engine.Features
             _resistanceFactor = resistanceFactor;
         }
 
-        public override string Name => "resistance";
+        public override string Name => $"resistance_{_resistanceFactor}x";
         public override string Description => $"Distance (bps) to nearest resistance level (ask qty > {_resistanceFactor}x typical)";
 
         public override decimal Compute(Observation observation, FeatureContext context)

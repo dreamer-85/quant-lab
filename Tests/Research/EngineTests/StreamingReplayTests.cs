@@ -191,11 +191,13 @@ namespace QuantConnect.Tests.Research.EngineTests
                 }
             }
 
-            // First observation is emitted as soon as the first in-range event is seen.
+            // The first observation is emitted as soon as the period it covers is known to be over,
+            // which is the moment the first event of the following period arrives. That is one event
+            // of lookahead: the engine must not run ahead through the dataset to find it.
             var streamingEngine = new EventReplayEngine(BuildConfig(ReorderMode.InOrderStreaming), MarketStateReconstructorFactory.Create(SecurityType.Crypto));
             var first = streamingEngine.Replay(EventStreamMerger.Merge(new[] { LazyEvents() })).First();
             Assert.AreEqual(_start, first.Timestamp);
-            Assert.LessOrEqual(maxProduced, 0, "Streaming replay must not advance the source beyond the first result");
+            Assert.LessOrEqual(maxProduced, 1, "Streaming replay must not advance the source beyond the first result");
 
             // Reset and confirm the full-sort path is eager (materializes everything before first result).
             maxProduced = -1;

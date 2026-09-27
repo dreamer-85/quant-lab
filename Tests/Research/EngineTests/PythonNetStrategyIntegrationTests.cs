@@ -181,6 +181,60 @@ namespace QuantConnect.Tests.Research.EngineTests
             }
         }
 
+        private const string NonFiniteScript =
+            "class Strategy:\n" +
+            "    def initialize(self, context):\n" +
+            "        pass\n" +
+            "\n" +
+            "    def on_observation(self, observation, features):\n" +
+            "        return {'bad': float('nan'), 'close': float(observation['close'])}\n";
+
+        private static string WriteNonFiniteScript()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "quantlab-tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var script = Path.Combine(dir, "nonfinite_strategy.py");
+            File.WriteAllText(script, NonFiniteScript);
+            return script;
+        }
+
+        [Test]
+        public void Host_RejectsNonFiniteFloatWithActionableMessage()
+        {
+            // NaN/Infinity are valid Python but not valid JSON. Letting them through would put a
+            // silently corrupt value in the output instead of failing, so the host must reject them
+            // and name the offending key.
+            var scriptPath = WriteNonFiniteScript();
+            var host = new PythonNetStrategyHost();
+            try
+            {
+                try
+                {
+                    host.Initialize(scriptPath, new Dictionary<string, object>());
+                }
+                catch (StrategyScriptException ex)
+                {
+                    SkipWhenRuntimeUnavailable(ex);
+                }
+
+                var ex2 = Assert.Throws<StrategyScriptException>(() => host.OnObservation(
+                    new Dictionary<string, object>
+                    {
+                        ["close"] = 1.0,
+                        ["timestamp"] = "2024-01-01T00:00:00.0000000Z"
+                    },
+                    new Dictionary<string, object>()));
+
+                Assert.That(ex2.Message, Does.Contain("non-finite"));
+                Assert.That(ex2.Message, Does.Contain("bad"),
+                    "the offending key must be named so the author can find it");
+            }
+            finally
+            {
+                host.Dispose();
+            }
+        }
+
         [Test]
         public void Host_ThrowsStrategyScriptExceptionWhenScriptMissing()
         {

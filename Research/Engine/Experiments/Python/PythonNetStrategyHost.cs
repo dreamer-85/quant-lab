@@ -593,9 +593,60 @@ namespace QuantConnect.Research.Engine.Experiments.Python
             using (encoded)
             {
                 var text = encoded.As<string>();
+
+                // json.dumps emits bare NaN/Infinity/-Infinity for non-finite floats, which is valid
+                // Python but not valid JSON, so JsonDocument.Parse would fail with an opaque
+                // "Expected a value" message. Detect it here and name the offending keys.
+                var nonFinite = FindNonFiniteTokens(text);
+                if (nonFinite != null)
+                {
+                    throw new StrategyScriptException(
+                        "Strategy returned a non-finite float (NaN or Infinity), which cannot be written to the " +
+                        $"experiment output. Offending value(s): {nonFinite}. Guard your arithmetic, e.g. " +
+                        "return None instead of float('nan'), or check the divisor before dividing.");
+                }
+
                 using var doc = JsonDocument.Parse(text);
                 return JsonValueToObject(doc.RootElement);
             }
+        }
+
+        /// <summary>
+        /// Scans JSON text for the bare NaN/Infinity/-Infinity tokens json.dumps produces, and returns a
+        /// short description of where they appear, or null when the payload is clean. Bounded scan: it
+        /// stops after the first few occurrences so a pathological row cannot be walked in full.
+        /// Internal rather than private so the token rules can be tested without a Python runtime.
+        /// </summary>
+        internal static string FindNonFiniteTokens(string json)
+        {
+            const int maxReported = 3;
+            var found = new List<string>();
+
+            foreach (var token in new[] { "NaN", "Infinity", "-Infinity" })
+            {
+                var index = 0;
+                while (found.Count < maxReported
+                       && (index = json.IndexOf(token, index, StringComparison.Ordinal)) >= 0)
+                {
+                    // A quoted occurrence is the literal string "NaN" inside data, not a non-finite float.
+                    var isQuoted = index > 0 && json[index - 1] == '"'
+                                   && index + token.Length < json.Length
+                                   && json[index + token.Length] == '"';
+                    if (!isQuoted)
+                    {
+                        found.Add(token);
+                    }
+
+                    index += token.Length;
+                }
+
+                if (found.Count >= maxReported)
+                {
+                    break;
+                }
+            }
+
+            return found.Count == 0 ? null : string.Join(", ", found);
         }
 
         private static object JsonValueToObject(JsonElement element)

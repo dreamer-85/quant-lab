@@ -39,11 +39,17 @@ the dataset into memory.
   for the reusable-library workflow (`docs/examples/python/research_binance.py`,
   `docs/examples/python/research_strategy_api.py`).
 - **Research layer on top of the engine.** A measurement catalog unifies the
-  feature/raw-field namespaces with metadata, derived measurements declare their
-  dependencies (auto-ordered, transitive closure), and declarative `hypothesis`
+  feature/raw-field namespaces with metadata, declarative `hypothesis`
   experiments test "condition → signal → forward return after N observations"
-  against the existing replay — plus `composite` runs multiple experiments over
-  one replay (`research-layer.md`).
+  against the existing replay, and `composite` runs multiple experiments over one
+  replay (`research-layer.md`). The dependency-ordering machinery is available
+  for custom features; no built-in feature declares one.
+- **Validation guardrails.** Configurable checks run alongside replay and
+  separate a job that went wrong from a hypothesis that was simply not
+  supported: a flow identity that catches an unsigned `trade_flow`, a
+  constant-column check that catches a condition fed by data the job never
+  received, and preflight checks that name the missing feature and the fix. Off,
+  warn (default), or fail, per job (`validation.md`).
 
 ## Repository layout
 
@@ -179,9 +185,26 @@ The pipeline never holds the dataset in memory:
 - `DelayedLabelResolver` keeps only the observations whose horizon has not yet
   elapsed — bounded by `ceil(horizon / observationInterval) + 1` entries, not by
   dataset length.
+- Validation findings are aggregated per distinct problem, and the `degenerate` /
+  `duplicate` checks keep one counter and one hash per output column — bounded by
+  the job's column count, not by dataset size.
 
 See `bounded-memory.md` for profiler results (live managed heap stays ~0.2 MB
 across 100K/1M/5M events).
+
+## Documentation
+
+| Document | Covers |
+| -------- | ------ |
+| [research-job.md](research-job.md)        | Job schema, validation rules, config hash, feed mode |
+| [features.md](features.md)                | Every selectable feature, its output column, and its parameters |
+| [validation.md](validation.md)            | Guardrail checks, `off`/`warn`/`fail` modes, report format |
+| [research-layer.md](research-layer.md)    | Measurement catalog, conditions, outcomes, composite runs |
+| [python-strategies.md](python-strategies.md) | The four-hook Python contract and the observation payload |
+| [ordering-determinism.md](ordering-determinism.md) | FullSort vs InOrderStreaming equivalence proof |
+| [checkpointing-resume.md](checkpointing-resume.md) | Resume semantics and equivalence |
+| [bounded-memory.md](bounded-memory.md)    | Memory model and profiler results |
+| [cloud-research.md](cloud-research.md)    | Cloud Run deployment |
 
 ## Tests
 

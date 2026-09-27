@@ -75,6 +75,9 @@ class ResearchJob:
     end_time: str = ""
     event_types: List[str] = field(default_factory=list)
     observation_interval_seconds: Optional[float] = 0.1
+    fill_forward: bool = True
+    max_observations: int = 0
+    grid_anchor: Optional[str] = None
     features: List[str] = field(default_factory=list)
     experiment_name: str = ""
     experiment_config: Dict[str, str] = field(default_factory=dict)
@@ -122,6 +125,9 @@ class ResearchJob:
             "observationInterval": None
             if self.observation_interval_seconds is None
             else _format_timespan(self.observation_interval_seconds),
+            "fillForward": self.fill_forward,
+            "maxObservations": self.max_observations,
+            "gridAnchor": self.grid_anchor,
             "features": list(self.features),
             "experimentName": self.experiment_name,
             "experimentConfig": dict(self.experiment_config),
