@@ -63,10 +63,12 @@ namespace QuantConnect.Tests.Research.EngineTests
                 cacheRoot: "C",
                 tempRoot: "T");
 
-            Assert.AreEqual("D", env.DataRoot);
-            Assert.AreEqual("O", env.OutputRoot);
-            Assert.AreEqual("C", env.CacheRoot);
-            Assert.AreEqual("T", env.TempRoot);
+            // Roots are stored absolute. The single-letter values stay distinct, so this still
+            // asserts that the explicit arguments won; it just accounts for normalization.
+            Assert.AreEqual(Path.GetFullPath("D"), env.DataRoot);
+            Assert.AreEqual(Path.GetFullPath("O"), env.OutputRoot);
+            Assert.AreEqual(Path.GetFullPath("C"), env.CacheRoot);
+            Assert.AreEqual(Path.GetFullPath("T"), env.TempRoot);
         }
 
         [Test]
@@ -81,8 +83,8 @@ namespace QuantConnect.Tests.Research.EngineTests
 
                 var env = new ResearchEnvironment();
 
-                Assert.AreEqual("A_DATA", env.DataRoot);
-                Assert.AreEqual("A_OUTPUT", env.OutputRoot);
+                Assert.AreEqual(Path.GetFullPath("A_DATA"), env.DataRoot);
+                Assert.AreEqual(Path.GetFullPath("A_OUTPUT"), env.OutputRoot);
             }
             finally
             {
@@ -130,6 +132,55 @@ namespace QuantConnect.Tests.Research.EngineTests
                 var full = Path.GetFullPath(output);
                 Assert.IsTrue(full.StartsWith(Path.GetFullPath(env.OutputRoot)), $"Expected output under env root, got {output}");
                 Assert.IsTrue(full.Contains(job.JobId));
+            }
+        }
+
+        [Test]
+        public void RelativeOutputRootIsNotAppliedTwice()
+        {
+            // A relative root used to be combined with the store's own root, so outputs landed
+            // in "out/out/<job>/..." while the manifest was written to "out/<job>/...". Nothing
+            // reported the difference; a reader following the manifest simply found no files.
+            var previousOutput = Environment.GetEnvironmentVariable(ResearchEnvironment.OutputRootEnvVar);
+            var root = "quantlab_relroot_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            try
+            {
+                Environment.SetEnvironmentVariable(ResearchEnvironment.OutputRootEnvVar, null);
+                var job = BuildJob();
+                job.OutputLocation = root;
+
+                var executor = new LocalResearchExecutor(
+                    new FakeEventSource(Trade(_start, 17200, 1, 1), Trade(_start.AddMinutes(5), 17250, 2, 2)),
+                    environment: new ResearchEnvironment(outputRoot: root));
+
+                var result = executor.Execute(job);
+
+                Assert.IsTrue(result.Succeeded);
+                Assert.IsNotEmpty(result.OutputFiles);
+
+                var absoluteRoot = Path.GetFullPath(root);
+                var marker = root.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                foreach (var output in result.OutputFiles)
+                {
+                    // Exactly one copy of the root may appear in any output path.
+                    var occurrences = marker.Count(segment =>
+                        output.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Count(part => part == segment) > 0);
+                    Assert.Less(occurrences, 2, $"Output path repeats the output root: {output}");
+
+                    // And the file the manifest names has to be the file that exists.
+                    Assert.IsTrue(File.Exists(Path.GetFullPath(output)),
+                        $"Manifest names a file that is not on disk: {output}");
+                    Assert.IsTrue(Path.GetFullPath(output).StartsWith(absoluteRoot));
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(ResearchEnvironment.OutputRootEnvVar, previousOutput);
+                var absoluteRoot = Path.GetFullPath(root);
+                if (Directory.Exists(absoluteRoot))
+                {
+                    Directory.Delete(absoluteRoot, true);
+                }
             }
         }
 

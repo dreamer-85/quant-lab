@@ -176,7 +176,7 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         [Test]
-        public void Preflight_DepthFeatureWithoutBookEvents_IsError()
+        public void Preflight_DepthFeatureWithQuotes_WarnsAboutTopOfBookOnly()
         {
             var report = new ValidationReport();
             var check = new JobConfigurationCheck();
@@ -185,8 +185,29 @@ namespace QuantConnect.Tests.Research.EngineTests
                 features: new List<string> { "imbalance" },
                 eventTypes: new List<MarketEventType> { MarketEventType.Trade, MarketEventType.Quote }), report);
 
-            Assert.That(report.Findings.Select(f => f.Message), Has.Some.Contains("OrderBookUpdate"));
-            Assert.That(report.Findings[0].Severity, Is.EqualTo(ValidationSeverity.Error));
+            // A quote carries the size resting at the best bid/ask, so depth and imbalance
+            // resolve to real numbers. This used to be an error telling people to capture L2,
+            // which was wrong twice over: top-of-book depth is enough for imbalance, and no REST
+            // endpoint serves historical L2 deltas anyway.
+            var finding = report.Findings.Single(f => f.Message.Contains("imbalance"));
+            Assert.That(finding.Severity, Is.EqualTo(ValidationSeverity.Warning));
+            Assert.That(finding.Message, Does.Contain("top-of-book"));
+        }
+
+        [Test]
+        public void Preflight_DepthFeatureWithoutQuotesOrBook_IsError()
+        {
+            var report = new ValidationReport();
+            var check = new JobConfigurationCheck();
+
+            // Trades alone carry no book at all, so depth genuinely cannot be computed.
+            check.Preflight(BuildJob(
+                features: new List<string> { "imbalance" },
+                eventTypes: new List<MarketEventType> { MarketEventType.Trade }), report);
+
+            var finding = report.Findings.Single(f => f.Message.Contains("imbalance"));
+            Assert.That(finding.Severity, Is.EqualTo(ValidationSeverity.Error));
+            Assert.That(finding.Message, Does.Contain("Quote"));
         }
 
         [Test]
@@ -906,8 +927,9 @@ namespace QuantConnect.Tests.Research.EngineTests
             var outputRoot = NewOutputRoot();
             try
             {
-                // Selects a depth feature without subscribing to order book events: a preflight error.
+                // Trades alone carry no book, so imbalance cannot be computed: a preflight error.
                 var job = SyntheticJob(outputRoot, features: new List<string> { "imbalance" });
+                job.EventTypes = new List<MarketEventType> { MarketEventType.Trade };
                 job.ExperimentConfig[ValidationOptions.ModeKey] = "fail";
 
                 var result = RunSynthetic(job, outputRoot);
@@ -928,12 +950,16 @@ namespace QuantConnect.Tests.Research.EngineTests
             try
             {
                 var job = SyntheticJob(outputRoot, features: new List<string> { "imbalance" });
+                // Trades alone carry no book, so depth really is unavailable here and the
+                // finding is an error. The point of this test is that warn mode runs anyway,
+                // so it needs a job that genuinely trips an error rather than a warning.
+                job.EventTypes = new List<MarketEventType> { MarketEventType.Trade };
 
                 var result = RunSynthetic(job, outputRoot);
 
                 Assert.That(result.Succeeded, Is.True, result.Error);
                 Assert.That(result.ValidationFindings.Select(f => f.Message),
-                    Has.Some.Contains("constant 0.0").Or.Some.Contains("order-book-dependent"));
+                    Has.Some.Contains("constant 0.0").Or.Some.Contains("neither quotes nor"));
             }
             finally
             {

@@ -43,7 +43,7 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         private static ReplayConfiguration Config(TimeSpan endOffset, TimeSpan? interval,
-            ReorderMode reorder = ReorderMode.FullSort)
+            ReorderMode reorder = ReorderMode.FullSort, DateTime? gridAnchor = null)
         {
             return new ReplayConfiguration
             {
@@ -53,6 +53,7 @@ namespace QuantConnect.Tests.Research.EngineTests
                 Venues = new List<string> { "bybit" },
                 EventTypes = new List<MarketEventType> { MarketEventType.Trade },
                 ObservationInterval = interval,
+                GridAnchor = gridAnchor,
                 Reorder = reorder
             };
         }
@@ -60,6 +61,65 @@ namespace QuantConnect.Tests.Research.EngineTests
         private static List<ReplayResult> Run(ReplayConfiguration config, IEnumerable<MarketEvent> events)
         {
             return new EventReplayEngine(config, new CLOBReconstructor()).Replay(events).ToList();
+        }
+
+        [Test]
+        public void OffPhaseGridAnchor_EmitsPeriodsOnTheAnchoredPhase()
+        {
+            // An explicit anchor is the user's stated phase and need not coincide with the start point.
+            // Periods advance by whole intervals from the first open bucket, and events are bucketed by
+            // phase from the anchor: if the two disagree, every event is attributed to the wrong
+            // window while the output still looks like a clean, evenly spaced grid.
+            var anchor = _start.AddSeconds(30);
+            var events = new List<MarketEvent> { Trade(_start.AddSeconds(40), 100m, 1) };
+
+            var results = Run(Config(TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(1), gridAnchor: anchor), events);
+
+            Assert.That(results, Is.Not.Empty);
+            foreach (var result in results)
+            {
+                var offset = (result.Timestamp - anchor).Ticks % TimeSpan.FromMinutes(1).Ticks;
+                Assert.That(offset, Is.EqualTo(0), $"{result.Timestamp:O} sits on the anchored phase");
+            }
+            Assert.That(results.All(r => r.Timestamp >= anchor), Is.True,
+                "no period may precede the anchor");
+        }
+
+        [Test]
+        public void OffPhaseGridAnchor_AttributesEventsToTheirOwnPeriod()
+        {
+            // The trade lands at :40, inside the period that opens at the :30 anchor and closes at 01:30.
+            // An observation is stamped at the end of the period it closes, so 01:30 must carry it --
+            // the same convention the default grid uses, just on a different phase.
+            var anchor = _start.AddSeconds(30);
+            var tradeTime = _start.AddSeconds(40);
+            var events = new List<MarketEvent> { Trade(tradeTime, 100m, 1) };
+
+            var results = Run(Config(TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(1), gridAnchor: anchor), events);
+            var carrier = results.FirstOrDefault(r => r.Events.Any(e => e.Timestamp == tradeTime));
+
+            Assert.That(carrier, Is.Not.Null, "the trade must be carried by some observation");
+            Assert.That(carrier.Timestamp, Is.EqualTo(anchor.AddMinutes(1)),
+                "the trade belongs to the period opened by the anchor, closed one interval later");
+            Assert.That(carrier.Quality, Is.EqualTo(DataQuality.Fresh));
+        }
+
+        [Test]
+        public void GridAnchorEqualToStartTime_MatchesTheDefaultGrid()
+        {
+            // Naming the start point explicitly must be indistinguishable from leaving it unset, or
+            // every job that sets it would get a different result from the same job that omits it.
+            var events = new List<MarketEvent>
+            {
+                Trade(_start, 100m, 1),
+                Trade(_start.AddMinutes(2), 120m, 2)
+            };
+
+            var implicitGrid = Run(Config(TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(1)), events);
+            var explicitGrid = Run(Config(TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(1), gridAnchor: _start), events);
+
+            Assert.That(explicitGrid.Select(r => r.Timestamp), Is.EqualTo(implicitGrid.Select(r => r.Timestamp)));
+            Assert.That(explicitGrid.Select(r => r.Quality), Is.EqualTo(implicitGrid.Select(r => r.Quality)));
         }
 
         [Test]

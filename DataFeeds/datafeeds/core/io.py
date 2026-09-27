@@ -69,6 +69,104 @@ def _write_rows(path: Path, header: str, rows, columns) -> int:
     return count
 
 
+class StreamingWriters:
+    """Appends rows to the staged CSVs as they arrive, for live sessions.
+
+    The ``write_*`` helpers above are atomic-at-end: they collect everything,
+    sort it, and swap a complete file into place in one ``os.replace``. That is
+    the right shape for a historical pull, where a reader only ever looks at
+    finished data, and it is why a live pull produced no files until the
+    websocket closed.
+
+    A live session has the opposite requirement. A research engine watching
+    the folder needs to see rows while the session is still running, so this
+    writer opens each file once, writes the header, appends each row, and
+    flushes immediately. Rows go out in arrival order, which for a websocket
+    feed is ascending in timestamp apart from rare out-of-order delivery.
+
+    Concurrency note: the same trade can arrive twice from a reconnecting
+    websocket. ``seen`` de-duplicates on the natural key for each row type so a
+    reconnect does not inflate volume. The buffer is per-session and bounded by
+    how much the session actually trades.
+    """
+
+    def __init__(self, feed_root, market: str, provider: str, symbol: str,
+                 enabled: bool = True, interval_seconds=None):
+        self.enabled = bool(enabled)
+        # Bars land in bars_<interval>.csv, which must match the name the
+        # non-streaming writer would have produced for the same interval.
+        self._bars_filename = f"bars_{interval_label(interval_seconds or 60)}.csv"
+        self.files: dict = {}
+        self.counts: dict = {}
+        self._handles: dict = {}
+        self._writers: dict = {}
+        self._seen: set = set()
+        self._dir = symbol_dir(feed_root, market, provider, symbol)
+        if not self.enabled:
+            return
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _writer_for(self, kind: str, filename: str, header: str, columns):
+        if kind not in self._writers:
+            path = self._dir / filename
+            # A pre-existing file from an earlier session would duplicate its
+            # header, so start clean when opening for append.
+            if path.exists():
+                path.unlink()
+            handle = path.open("a", newline="", encoding="utf-8")
+            writer = csv.writer(handle)
+            writer.writerow(header.split(","))
+            handle.flush()
+            self._handles[kind] = handle
+            self._writers[kind] = writer
+            self.files[kind] = path
+            self.counts[kind] = 0
+        return self._writers[kind], self._handles[kind]
+
+    def _emit(self, kind: str, key, filename: str, header: str, columns, row) -> None:
+        if not self.enabled or key in self._seen:
+            return
+        self._seen.add(key)
+        writer, handle = self._writer_for(kind, filename, header, columns)
+        writer.writerow(columns(row))
+        handle.flush()
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+
+    def trade(self, t: Trade) -> None:
+        self._emit("trades", (t.timestamp_ms, t.trade_id or t.price, t.size), "trades.csv", TRADE_HEADER,
+                   lambda r: [r.timestamp_ms, r.price, r.size, r.side, r.trade_id or ""], t)
+
+    def quote(self, q: Quote) -> None:
+        self._emit("quotes", (q.timestamp_ms, q.bid_price, q.ask_price), "quotes.csv", QUOTE_HEADER,
+                   lambda r: [r.timestamp_ms, r.bid_price, r.bid_size, r.ask_price, r.ask_size], q)
+
+    def bar(self, b: Bar) -> None:
+        self._emit("bars", b.timestamp_ms, self._bars_filename, BAR_HEADER,
+                   lambda r: [r.timestamp_ms, r.open, r.high, r.low, r.close, r.volume], b)
+
+    def book_update(self, u) -> None:
+        self._emit("book_updates", (u.timestamp_ms, u.side, u.price, u.quantity), "book_updates.csv",
+                   BOOK_UPDATE_HEADER,
+                   lambda r: [r.timestamp_ms, r.side, r.price, r.quantity, r.action], u)
+
+    def close(self) -> None:
+        for handle in self._handles.values():
+            try:
+                handle.flush()
+                handle.close()
+            except OSError:
+                pass
+        self._handles.clear()
+        self._writers.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 def write_bars(feed_root, market: str, provider: str, symbol: str, interval_seconds, bars) -> tuple[Path, int]:
     """Writes sorted OHLCV bars to ``bars_<seconds>.csv``. Returns (path, count)."""
     ordered = sorted(bars, key=lambda b: b.timestamp_ms) if bars else []

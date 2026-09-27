@@ -28,6 +28,11 @@ the dataset into memory.
 - **Pluggable features and experiments.** Features register by name in
   `FeatureRegistry`; experiments consume observations/outcomes through
   `IExperiment`.
+- **Paper trading and equity.** The `position` experiment turns a condition into
+  a real position: filled entry, held exposure marked every observation, filled
+  exit, and a trade log plus equity curve (`positions-and-equity.md`). Equity,
+  the trade log and the reported return are held to one accounting invariant, so
+  they cannot quietly disagree.
 - **Python strategy scripts.** `python_strategy` experiments run a user-written
   `.py` file (Lean-style `initialize` / `on_observation` / `on_outcome` /
   `finalize` hooks) over the observation/feature stream — strategy logic stays
@@ -200,6 +205,7 @@ across 100K/1M/5M events).
 | [features.md](features.md)                | Every selectable feature, its output column, and its parameters |
 | [validation.md](validation.md)            | Guardrail checks, `off`/`warn`/`fail` modes, report format |
 | [research-layer.md](research-layer.md)    | Measurement catalog, conditions, outcomes, composite runs |
+| [positions-and-equity.md](positions-and-equity.md) | The `position` experiment, trade log, equity curve, accounting invariant |
 | [python-strategies.md](python-strategies.md) | The four-hook Python contract and the observation payload |
 | [ordering-determinism.md](ordering-determinism.md) | FullSort vs InOrderStreaming equivalence proof |
 | [checkpointing-resume.md](checkpointing-resume.md) | Resume semantics and equivalence |

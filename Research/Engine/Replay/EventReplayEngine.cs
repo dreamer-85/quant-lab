@@ -136,8 +136,15 @@ namespace QuantConnect.Research.Engine.Replay
             var interval = _config.ObservationInterval;
 
             // The next grid point to emit. Null only in event-driven mode.
+            //
+            // Snapped up to the configured grid phase: periods advance by whole intervals from this
+            // point, and CeilToGrid buckets events by phase from GridOrigin. When the two disagree —
+            // which an explicit GridAnchor that is off-phase with respect to the start point allows —
+            // events would be attributed to a different period than the one emitted, so every period
+            // would be attributed to the wrong window while still looking plausible. A no-op in the
+            // default case, where the origin is the start point itself and is already on phase.
             DateTime? nextObservationTime = interval.HasValue
-                ? (_config.InitialNextObservationTime ?? _config.StartTime)
+                ? CeilToGrid(_config.InitialNextObservationTime ?? _config.StartTime, interval.Value)
                 : null;
 
             // A resumed run must not re-emit grid points the previous chunk already wrote.
@@ -163,7 +170,6 @@ namespace QuantConnect.Research.Engine.Replay
 
                 if (AtObservationLimit())
                 {
-                    Console.WriteLine($"TRACE capbreak at {evt.Timestamp:HH:mm:ss} obs={_observationsEmitted}");
                     truncated = true;
                     _truncated = true;
                     break;
@@ -178,6 +184,14 @@ namespace QuantConnect.Research.Engine.Replay
                 // streams and by replay jobs that want a per-event window instead of a grid.
                 if (!interval.HasValue)
                 {
+                    // A tick is a frontier advance, and event-driven mode has no frontier to advance:
+                    // without this it would become an observation of nothing, and a count of "events"
+                    // that included the passage of time rather than anything about the market.
+                    if (evt is ClockTickEvent)
+                    {
+                        continue;
+                    }
+
                     ApplyEvent(evt, currentState, ref hasState);
                     _eventsProcessed++;
                     _lastProcessedTimestamp = evt.Timestamp;
@@ -206,7 +220,6 @@ namespace QuantConnect.Research.Engine.Replay
 
                     var closed = CloseThrough(bucket.Value, ref openBucket, openEvents, currentState,
                         hasState, interval.Value, out var hitLimit);
-                    Console.WriteLine($"TRACE clock tick {evt.Timestamp:HH:mm:ss} open={openBucket:HH:mm:ss} through={bucket:HH:mm:ss} emitted={closed.Count} hit={hitLimit} obs={_observationsEmitted}");
                     foreach (var closedResult in closed)
                     {
                         yield return closedResult;
@@ -522,6 +535,16 @@ namespace QuantConnect.Research.Engine.Replay
         /// </summary>
         private bool PassesFilter(MarketEvent evt)
         {
+            // A clock tick belongs to no symbol, venue or event type — it is the passage of time, not
+            // data about an instrument. The filters below are all about which data a job asked for, and
+            // applying them to a tick would discard every tick of a multi-symbol run and any run with a
+            // venue or event-type filter set. Time range is enforced separately, in the replay loop,
+            // which is the only bound a tick actually needs.
+            if (evt is ClockTickEvent)
+            {
+                return true;
+            }
+
             // Symbol filter
             if (_config.Symbols.Count > 0 && !_config.Symbols.Contains(evt.Symbol))
                 return false;

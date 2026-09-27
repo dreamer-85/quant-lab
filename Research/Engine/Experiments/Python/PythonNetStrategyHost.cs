@@ -613,40 +613,125 @@ namespace QuantConnect.Research.Engine.Experiments.Python
 
         /// <summary>
         /// Scans JSON text for the bare NaN/Infinity/-Infinity tokens json.dumps produces, and returns a
-        /// short description of where they appear, or null when the payload is clean. Bounded scan: it
-        /// stops after the first few occurrences so a pathological row cannot be walked in full.
-        /// Internal rather than private so the token rules can be tested without a Python runtime.
+        /// short description naming both the offending key path and the token, or null when the payload
+        /// is clean. Bounded: it stops after the first few distinct paths so a pathological row cannot be
+        /// walked in full. Internal rather than private so the token rules can be tested without a Python
+        /// runtime.
+        ///
+        /// Naming the key is the whole point. "Offending value: NaN" leaves the author to hunt for it;
+        /// "rows[3].close: NaN" is a fix.
         /// </summary>
         internal static string FindNonFiniteTokens(string json)
         {
             const int maxReported = 3;
-            var found = new List<string>();
 
-            foreach (var token in new[] { "NaN", "Infinity", "-Infinity" })
+            // A sentinel per token, quoted, so substituting them makes the payload valid JSON and the
+            // exact key path can then be read off a parsed document. Parsing alone cannot work: that is
+            // the failure this method exists to pre-empt.
+            //
+            // The sentinels must be printable: a raw control character is not legal inside a JSON
+            // string literal, so JsonDocument.Parse would reject the document and the path walk would
+            // silently degrade to reporting bare tokens, which is the bug this replaces.
+            var sentinels = new (string Token, string Sentinel)[]
+            {
+                ("-Infinity", "__quantlab_nonfinite_neg_inf_7f21__"),
+                ("Infinity", "__quantlab_nonfinite_inf_7f21__"),
+                ("NaN", "__quantlab_nonfinite_nan_7f21__"),
+            };
+
+            var scrubbed = json;
+            var counts = new Dictionary<string, int>();
+            foreach (var (token, sentinel) in sentinels)
             {
                 var index = 0;
-                while (found.Count < maxReported
-                       && (index = json.IndexOf(token, index, StringComparison.Ordinal)) >= 0)
+                while ((index = scrubbed.IndexOf(token, index, StringComparison.Ordinal)) >= 0)
                 {
-                    // A quoted occurrence is the literal string "NaN" inside data, not a non-finite float.
-                    var isQuoted = index > 0 && json[index - 1] == '"'
-                                   && index + token.Length < json.Length
-                                   && json[index + token.Length] == '"';
+                    var isQuoted = index > 0 && scrubbed[index - 1] == '"'
+                                   && index + token.Length < scrubbed.Length
+                                   && scrubbed[index + token.Length] == '"';
                     if (!isQuoted)
                     {
-                        found.Add(token);
+                        scrubbed = scrubbed.Substring(0, index)
+                                   + "\"" + sentinel + "\""
+                                   + scrubbed.Substring(index + token.Length);
+                        counts[sentinel] = counts.GetValueOrDefault(sentinel) + 1;
+                        index += sentinel.Length + 2;
                     }
-
-                    index += token.Length;
-                }
-
-                if (found.Count >= maxReported)
-                {
-                    break;
+                    else
+                    {
+                        index += token.Length;
+                    }
                 }
             }
 
-            return found.Count == 0 ? null : string.Join(", ", found);
+            if (counts.Count == 0)
+            {
+                return null;
+            }
+
+            var reported = new List<string>();
+            try
+            {
+                using var doc = JsonDocument.Parse(scrubbed);
+                CollectNonFinitePaths(doc.RootElement, "", sentinels, reported);
+            }
+            catch (JsonException)
+            {
+                // The payload is malformed for some reason other than the non-finite floats. Report the
+                // tokens so the author still learns what was wrong with their arithmetic.
+                foreach (var (token, sentinel) in sentinels)
+                {
+                    if (counts.ContainsKey(sentinel))
+                    {
+                        reported.Add(token);
+                    }
+                }
+            }
+
+            if (reported.Count == 0)
+            {
+                return null;
+            }
+
+            return string.Join(", ", reported.Take(maxReported));
+        }
+
+        /// <summary>
+        /// Walks a sentinel-substituted document and records "path: Token" for each non-finite value,
+        /// deduplicated so one bad column reported fifty thousand times reads as one problem.
+        /// </summary>
+        private static void CollectNonFinitePaths(JsonElement element, string path,
+            (string Token, string Sentinel)[] sentinels, List<string> reported)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var property in element.EnumerateObject())
+                    {
+                        CollectNonFinitePaths(property.Value,
+                            path.Length == 0 ? property.Name : path + "." + property.Name,
+                            sentinels, reported);
+                    }
+                    break;
+                case JsonValueKind.Array:
+                    var index = 0;
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        CollectNonFinitePaths(item, path + "[" + index + "]", sentinels, reported);
+                        index++;
+                    }
+                    break;
+                case JsonValueKind.String:
+                    var text = element.GetString();
+                    foreach (var (token, sentinel) in sentinels)
+                    {
+                        if (text == sentinel && !reported.Any(r => r == $"{path}: {token}"))
+                        {
+                            reported.Add($"{path}: {token}");
+                        }
+                    }
+                    break;
+            }
         }
 
         private static object JsonValueToObject(JsonElement element)

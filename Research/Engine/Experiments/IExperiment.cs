@@ -197,6 +197,29 @@ namespace QuantConnect.Research.Engine.Experiments
         public List<Dictionary<string, object>> Rows { get; set; } = new();
 
         /// <summary>
+        /// Additional named result tables, each written to its own file alongside the main rows.
+        ///
+        /// A strategy's output is not one table. The rows that matter are spread across the trade
+        /// log, the equity curve and the fills, and flattening them into a single file with nulls
+        /// everywhere else would make the artifacts worse rather than more complete. Experiments put
+        /// what they produce here by name, and the runner writes one file per table.
+        /// </summary>
+        public Dictionary<string, List<Dictionary<string, object>>> NamedRows { get; set; } = new();
+
+        /// <summary>
+        /// Adds a named result table, ignoring a null table so callers do not have to check
+        /// </summary>
+        public void AddNamedRows(string name, List<Dictionary<string, object>> rows)
+        {
+            if (string.IsNullOrWhiteSpace(name) || rows == null)
+            {
+                return;
+            }
+
+            NamedRows[name] = rows;
+        }
+
+        /// <summary>
         /// Configuration hash
         /// </summary>
         public string ConfigurationHash { get; set; } = string.Empty;

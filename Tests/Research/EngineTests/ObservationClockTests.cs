@@ -326,11 +326,56 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         [Test]
-        public void LiveClock_ReproducesTheBacktestSeriesExactly()
+        public void LiveClock_DeliversQuietPeriodsBeforeTheStreamEnds()
         {
-            // The property that motivated the clock: the same events, once through a live-style stream
-            // that goes quiet, and once with no clock at all, must describe the same periods. Without
-            // ticks the live run stops at the last event and the two series cover different spans.
+            // The live property, stated as a test. A live run has no end of data, so tail padding can
+            // never rescue it: if the quiet periods only appeared when the stream finished, a real
+            // live run would emit nothing at all while the market is quiet. Consume lazily and check
+            // that the period arrives while later events are still to come.
+            var trades = new List<MarketEvent>
+            {
+                Trade(_start, 100m, 1),
+                Trade(_start.AddMinutes(20), 120m, 2)
+            };
+
+            var withClock = new List<MarketEvent>();
+            for (var minute = 1; minute <= 20; minute++)
+            {
+                withClock.Add(new ClockTickEvent(_start.AddMinutes(minute)));
+            }
+            withClock.InsertRange(1, trades);
+
+            var engine = new EventReplayEngine(new ReplayConfiguration
+            {
+                StartTime = _start,
+                EndTime = _start.AddMinutes(20),
+                Symbols = new List<Symbol> { _sBybit },
+                ObservationInterval = TimeSpan.FromMinutes(1)
+            }, MarketStateReconstructorFactory.Create(SecurityType.Crypto));
+
+            var seenBeforeTheSecondTrade = new List<ReplayResult>();
+            foreach (var r in engine.Replay(withClock.OrderBy(e => e.Timestamp).ThenBy(e => e.SequenceNumber)))
+            {
+                if (r.Timestamp >= _start.AddMinutes(20))
+                {
+                    break;
+                }
+
+                seenBeforeTheSecondTrade.Add(r);
+            }
+
+            Assert.AreEqual(20, seenBeforeTheSecondTrade.Count,
+                "the 20 quiet periods must be delivered while the run is still going, not at the end");
+            Assert.IsTrue(seenBeforeTheSecondTrade.Skip(1).All(r => r.Quality == DataQuality.Filled),
+                "and they must be reported as padding, not as measurements");
+        }
+
+        [Test]
+        public void LiveClock_AndBacktest_DescribeTheSamePeriods()
+        {
+            // Same events, same grid, same qualities either way: the clock changes *when* periods are
+            // published, never which ones exist or what they contain. Without that, a live run and a
+            // backtest over the same data would be two different experiments.
             var trades = new List<MarketEvent>
             {
                 Trade(_start, 100m, 1),
@@ -349,7 +394,8 @@ namespace QuantConnect.Tests.Research.EngineTests
             var ticked = Run(withClock.OrderBy(e => e.Timestamp).ThenBy(e => e.SequenceNumber), interval, end, out _);
             var untiled = Run(trades, interval, end, out _);
 
-            Assert.AreEqual(21, untiled.Count, "without a clock the run still pads to the window end");
+            Assert.AreEqual(21, ticked.Count);
+            Assert.AreEqual(untiled.Count, ticked.Count);
             Assert.AreEqual(
                 untiled.Select(r => r.Timestamp).ToArray(),
                 ticked.Select(r => r.Timestamp).ToArray(),

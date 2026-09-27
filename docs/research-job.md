@@ -120,14 +120,42 @@ spends only what the earlier segment left, so head plus tail still equals the
 cap. A run that stops on a limit reports it through the `coverage` check as a
 valid prefix, so a truncated file is never mistaken for a complete window.
 
-`gridAnchor` pins the phase of the grid. It is inferred from the effective start
-of the first chunk, which is what keeps a resumed run on the same grid as the
-run it continues; set it explicitly only to align runs that start at different
-times.
+`gridAnchor` pins the phase of the grid: periods are `gridAnchor + n x
+observationInterval`. It is inferred from the effective start of the first chunk,
+which is what keeps a resumed run on the same grid as the run it continues; set
+it explicitly to align runs that start at different times.
+
+An explicit anchor need not coincide with `startTime`. The first period opens at
+the first grid point at or after the start, so no period is emitted before the
+anchor and every event falls in the period the anchor defines. Naming
+`startTime` explicitly is identical to omitting the field.
 
 Whichever combination you pick, the `freshness` and `coverage` checks report
 what the grid actually did rather than leaving you to infer it from the row
 count. See [validation.md](validation.md).
+
+### Live runs and quiet markets
+
+In backtest the frontier moves because events arrive. A live feed has no end of
+data, and a quiet market produces no events at all, so a frontier that only
+advances on events would stall until trading resumed — the live run would
+publish nothing during the quiet stretch, and a strategy waiting on the next
+period would wait for as long as the market is uninteresting.
+
+Live runs therefore also carry a **clock**: a tick is emitted on every
+observation-grid boundary, which closes the periods that have fully elapsed and
+publishes them as `data_quality=filled`. Consequences worth knowing:
+
+- A live run over the same events as a backtest produces the same periods with
+  the same qualities. The clock changes *when* a period is published, never
+  which periods exist or what they contain.
+- Ticks are not data. They are not counted as events, never enter an
+  observation's event lists, and are never exposed to a strategy — a quiet
+  period is padding, and it says so.
+- Ticks land exactly on grid boundaries, so a period is never closed early and
+  real events are never miscounted as arriving late.
+- The clock only exists when there is a grid. With `observationInterval` set to
+  null there are no periods for it to close, and a live run goes event-driven.
 
 ## Example: real Bybit BTCUSDT day (2161 events → 289 obs)
 
@@ -195,7 +223,34 @@ the Lean zip store; `--data-dir` is the feed root:
 `OrderBookUpdate` must be in `eventTypes` to read `book_updates.csv`. Order book
 data is what feeds depth measurements (`bid_depth`, `ask_depth`, `imbalance`,
 `depth_ratio`, ...); without it those measurements are constant 0 and a
-depth-based condition never fires. A runnable example lives at
+depth-based condition never fires.
+
+No REST endpoint in this toolchain serves historical L2 deltas, so
+`book_updates.csv` is produced by a websocket capture rather than a backfill:
+
+```
+python -m datafeeds capture --market crypto --provider bybit --symbol BTCUSDT ^
+  --duration 600 --depth 50 --out feeds
+```
+
+This stages `feeds/crypto/bybit/BTCUSDT/book_updates.csv` in exactly the layout
+above. Two properties of the capture are worth knowing, because both would
+otherwise produce a file that loads and replays a wrong book rather than
+failing:
+
+- **The opening snapshot is kept.** The engine rebuilds the book by applying
+  updates to an empty state, so a delta capture without its base would replay a
+  book that starts empty and stays wrong until depth happens to accumulate. If
+  the capture never receives a snapshot, nothing is staged and the command
+  reports an error.
+- **Sequence gaps are reported.** A gap means levels changed in frames the
+  capture never saw, so the file is still written but the summary carries a
+  warning that the book is wrong from the first gap onward.
+
+`--depth` must be at least 50: shallower depths are point-in-time snapshots, not
+deltas, and would stage a book that never changes.
+
+A runnable example lives at
 `docs/examples/hypothesis/` (`book_updates.csv` made ask-heavy, then flipping
 bid-heavy, plus `trades.csv`/`quotes.csv`):
 

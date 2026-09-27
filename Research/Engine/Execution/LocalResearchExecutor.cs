@@ -131,8 +131,10 @@ namespace QuantConnect.Research.Engine.Execution
                                 StartTime = resumeFrom.AddTicks(1),
                                 // The tail continues the original grid. Its own StartTime sits one tick
                                 // past the last written observation, which would shift every grid point
-                                // and stop the tail lining up with the run it continues.
-                                GridAnchor = config.StartTime,
+                                // and stop the tail lining up with the run it continues. An explicit
+                                // anchor is the user's stated phase and outranks the start point; without
+                                // one, the original StartTime keeps the phase the head ran on.
+                                GridAnchor = config.GridAnchor ?? config.StartTime,
                                 EndTime = config.EndTime,
                                 Symbols = config.Symbols,
                                 Venues = config.Venues,
@@ -343,6 +345,21 @@ namespace QuantConnect.Research.Engine.Execution
                         var expPath = BuildExperimentOutputPath(job, experimentResult);
                         PersistExperimentOutput(expPath, experimentResult, job.OutputFormat);
                         result.OutputFiles.Add(expPath);
+                    }
+
+                    // Named tables are separate artifacts, not extra columns: a trade log and an
+                    // equity curve have different shapes and different consumers, and merging them
+                    // would mean null-padding one into the other.
+                    foreach (var named in experimentResult?.NamedRows ?? new Dictionary<string, List<Dictionary<string, object>>>())
+                    {
+                        if (named.Value == null || named.Value.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        var tablePath = BuildExperimentTablePath(job, experimentResult, named.Key);
+                        PersistTable(tablePath, named.Value, job.OutputFormat);
+                        result.OutputFiles.Add(tablePath);
                     }
                 }
 
@@ -629,9 +646,16 @@ namespace QuantConnect.Research.Engine.Execution
         /// Resolves the output root for a job: an explicit job location wins, otherwise the environment root.
         /// Jobs carry only logical content; the physical root is an environment concern.
         /// </summary>
+        /// <remarks>
+        /// The result is always absolute. Every path this executor builds is handed to the data
+        /// store, which resolves a relative path against its own root; a relative root here would
+        /// therefore be appended to the root a second time and the outputs would land one level
+        /// deeper than the manifest that reports them, with nothing failing.
+        /// </remarks>
         private string ResolveOutputRoot(ResearchJob job)
         {
-            return string.IsNullOrWhiteSpace(job.OutputLocation) ? _environment.OutputRoot : job.OutputLocation;
+            var root = string.IsNullOrWhiteSpace(job.OutputLocation) ? _environment.OutputRoot : job.OutputLocation;
+            return string.IsNullOrWhiteSpace(root) ? Directory.GetCurrentDirectory() : Path.GetFullPath(root);
         }
 
         /// <summary>
@@ -666,6 +690,43 @@ namespace QuantConnect.Research.Engine.Execution
                 _ => "parquet"
             };
             return Path.Combine(directory, $"{experimentResult.ExperimentName}.{extension}");
+        }
+
+        /// <summary>
+        /// Path for one named result table, e.g. experiment/position_trades.csv
+        /// </summary>
+        private string BuildExperimentTablePath(ResearchJob job, ExperimentResult experimentResult, string table)
+        {
+            var directory = Path.Combine(ResolveOutputRoot(job), job.JobId, "experiment");
+            _outputStore.CreateDirectory(directory);
+            var extension = job.OutputFormat.ToLowerInvariant() switch
+            {
+                "csv" => "csv",
+                "json" => "json",
+                _ => "parquet"
+            };
+
+            var safeTable = SanitizeFileName(table);
+            return Path.Combine(directory, $"{experimentResult.ExperimentName}_{safeTable}.{extension}");
+        }
+
+        /// <summary>
+        /// Reduces a table name to something safe to use as a file name, so an experiment cannot
+        /// write outside the output directory by naming a table "../escape".
+        /// </summary>
+        private static string SanitizeFileName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return "table";
+            }
+
+            var invalid = Path.GetInvalidFileNameChars();
+            var cleaned = new string(name.Select(c => invalid.Contains(c) || c == '.' || c == '/' || c == '\\'
+                ? '_'
+                : c).ToArray()).Trim('_');
+
+            return string.IsNullOrEmpty(cleaned) ? "table" : cleaned;
         }
 
         /// <summary>
@@ -744,6 +805,20 @@ namespace QuantConnect.Research.Engine.Execution
                 using var metricsStream = _outputStore.OpenWrite(metricsPath);
                 using var textWriter = new StreamWriter(metricsStream);
                 textWriter.Write(System.Text.Json.JsonSerializer.Serialize(experimentResult.Metrics));
+            }
+        }
+
+        /// <summary>
+        /// Persists a single named result table. No metrics sidecar, since metrics belong to the
+        /// experiment as a whole rather than to each of its tables.
+        /// </summary>
+        private void PersistTable(string path, List<Dictionary<string, object>> rows, string format)
+        {
+            using var stream = _outputStore.OpenWrite(path);
+            using var writer = new ResearchOutputWriter(stream, format);
+            foreach (var row in rows)
+            {
+                writer.WriteRow(row);
             }
         }
     }

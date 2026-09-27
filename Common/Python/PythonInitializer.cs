@@ -21,6 +21,7 @@ using Python.Runtime;
 using QuantConnect.Util;
 using QuantConnect.Logging;
 using System.Collections.Generic;
+using System.Diagnostics;
 using QuantConnect.Configuration;
 
 namespace QuantConnect.Python
@@ -42,6 +43,107 @@ namespace QuantConnect.Python
         private static string _algorithmLocation;
 
         /// <summary>
+        /// Points Python.NET at the shared libpython for the interpreter on this machine, when one has
+        /// not already been configured.
+        ///
+        /// Most distributions ship a <c>libpythonX.Y.so</c> next to the interpreter, but Python.NET
+        /// cannot find it on its own: it looks for a file named after the running process, so it fails
+        /// with a bare "Failed to initialize the Python runtime" unless PYTHONNET_PYDLL or
+        /// Runtime.PythonDLL is set. Requiring an environment variable means Python strategies work on
+        /// the developer's machine and silently do not work anywhere else, so the library is located
+        /// here instead. A non-shared build genuinely has no such file, in which case nothing is set
+        /// and Python.NET's own resolution is left to try.
+        ///
+        /// PYTHONNET_PYDLL still wins: an explicit setting is a deliberate choice, not something to
+        /// second-guess.
+        /// </summary>
+        private static void TryResolveSharedPythonLibrary()
+        {
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PYTHONNET_PYDLL")))
+            {
+                return;
+            }
+
+            try
+            {
+                var resolved = ResolveSharedPythonLibrary();
+                if (!string.IsNullOrEmpty(resolved))
+                {
+                    Log.Trace($"PythonInitializer: using shared library {resolved}");
+                    Runtime.PythonDLL = resolved;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Discovery is a convenience. If it fails, fall through and let Python.NET report the
+                // real problem in its own words rather than masking it with a discovery error.
+                Log.Debug($"PythonInitializer: shared library discovery skipped: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Asks the <c>python3</c> on PATH where its shared library is. Returns null when the
+        /// interpreter is statically linked, or cannot be run.
+        /// </summary>
+        private static string ResolveSharedPythonLibrary()
+        {
+            var python = FindOnPath("python3") ?? FindOnPath("python");
+            if (python == null)
+            {
+                return null;
+            }
+
+            const string probe = "import sysconfig,os;p=os.path.join(sysconfig.get_config_var('LIBDIR') or ''," +
+                "sysconfig.get_config_var('INSTSONAME') or '');print(p if os.path.exists(p) else '')";
+
+            var info = new ProcessStartInfo(python, "-c \"" + probe + "\"")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(info);
+            if (process == null)
+            {
+                return null;
+            }
+
+            var output = process.StandardOutput.ReadToEnd().Trim();
+            process.WaitForExit(10_000);
+
+            return string.IsNullOrWhiteSpace(output) ? null : output;
+        }
+
+        private static string FindOnPath(string executable)
+        {
+            var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            foreach (var directory in path.Split(Path.PathSeparator))
+            {
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var candidate = Path.Combine(directory, executable);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                catch (Exception)
+                {
+                    // An unreadable PATH entry should not stop the search.
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
         /// Initialize python.
         ///
         /// In some cases, we might not need to call BeginAllowThreads, like when we're running
@@ -53,6 +155,7 @@ namespace QuantConnect.Python
             if (!_isInitialized)
             {
                 Log.Trace($"PythonInitializer.Initialize(): {Messages.PythonInitializer.Start}...");
+                TryResolveSharedPythonLibrary();
                 PythonEngine.Initialize();
 
                 if (beginAllowThreads)

@@ -202,7 +202,10 @@ namespace QuantConnect.Tests.Research.EngineTests
             Assert.AreEqual(0, second.SymbolsProcessed, "Second run should reuse the completed symbol");
             Assert.AreEqual(1, second.SymbolsReused);
 
-            var checkpointPath = "memroot/storetest/checkpoints/BTCUSDT.json";
+            // Roots are normalized to absolute, so the checkpoint key is rooted too. Building it
+            // the same way keeps this test asserting "the checkpoint persisted under the output
+            // root" instead of pinning one particular spelling of a relative path.
+            var checkpointPath = Path.Combine(Path.GetFullPath("memroot"), "storetest", "checkpoints", "BTCUSDT.json");
             Assert.IsTrue(store.Exists(checkpointPath), $"Checkpoint not found: {checkpointPath}");
         }
 

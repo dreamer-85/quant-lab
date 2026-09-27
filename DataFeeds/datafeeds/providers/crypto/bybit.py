@@ -16,7 +16,7 @@ import time
 from ...core.base_feeds import FeedResult, HistoricalFeed, LiveFeed
 from ...core.datatypes import Bar, Quote, Trade
 from ...core.http import http_get_json
-from ...core.io import symbol_dir, write_bars, write_quotes, write_trades
+from ...core.io import StreamingWriters, symbol_dir, write_bars, write_quotes, write_trades
 from ...core.registry import register_feed
 from ...core.times import parse_interval, to_unix_ms, utcnow_ms
 from ...core.ws import WsConnection
@@ -136,7 +136,7 @@ class BybitLiveFeed(LiveFeed):
     provider = "bybit"
     market = "crypto"
 
-    def stream(self, symbol, duration_seconds, interval=None, out_root=None, **kwargs):
+    def stream(self, symbol, duration_seconds, interval=None, out_root=None, stream_to_disk=False, **kwargs):
         out_root = out_root or "feeds"
         seconds = parse_interval(interval) if interval else 60
         token = native_interval(seconds)
@@ -147,6 +147,9 @@ class BybitLiveFeed(LiveFeed):
 
         bars, trades, quotes = [], [], []
         stop_at = time.monotonic() + float(duration_seconds)
+
+        sink = StreamingWriters(out_root, self.market, self.provider, symbol,
+                                enabled=stream_to_disk, interval_seconds=seconds)
 
         def handler(text: str):
             try:
@@ -160,12 +163,16 @@ class BybitLiveFeed(LiveFeed):
                 return time.monotonic() < stop_at
             if "publicTrade" in topic:
                 for row in msg.get("data", []):
-                    trades.append(Trade(int(row.get("T", 0)), float(row.get("p", 0)), float(row.get("v", 0)),
-                                        str(row.get("S", "unknown")).lower(), row.get("i")))
+                    trade = Trade(int(row.get("T", 0)), float(row.get("p", 0)), float(row.get("v", 0)),
+                                  str(row.get("S", "unknown")).lower(), row.get("i"))
+                    trades.append(trade)
+                    sink.trade(trade)
             elif "kline" in topic:
                 for row in msg.get("data", []):
-                    bars.append(Bar(int(row.get("start", 0)), float(row.get("open", 0)), float(row.get("high", 0)),
-                                    float(row.get("low", 0)), float(row.get("close", 0)), float(row.get("volume", 0))))
+                    bar = Bar(int(row.get("start", 0)), float(row.get("open", 0)), float(row.get("high", 0)),
+                              float(row.get("low", 0)), float(row.get("close", 0)), float(row.get("volume", 0)))
+                    bars.append(bar)
+                    sink.bar(bar)
             elif "orderbook" in topic:
                 data = msg.get("data", {}) or {}
                 bids, asks = data.get("b", []), data.get("a", [])
@@ -173,7 +180,9 @@ class BybitLiveFeed(LiveFeed):
                     best_bid = max(bids, key=lambda l: float(l[0]))
                     best_ask = min(asks, key=lambda l: float(l[0]))
                     ts = int(data.get("ts", utcnow_ms()))
-                    quotes.append(Quote(ts, float(best_bid[0]), float(best_bid[1]), float(best_ask[0]), float(best_ask[1])))
+                    quote = Quote(ts, float(best_bid[0]), float(best_bid[1]), float(best_ask[0]), float(best_ask[1]))
+                    quotes.append(quote)
+                    sink.quote(quote)
             return time.monotonic() < stop_at
 
         topics = []
@@ -188,18 +197,26 @@ class BybitLiveFeed(LiveFeed):
         url = WS_LINEAR if category == "linear" else WS_SPOT
         conn = WsConnection(url, handler, ping_payload='{"op":"ping"}', ping_interval_s=20)
         conn.send_json({"op": "subscribe", "args": topics})
-        conn.run()
-        conn.close()
+        try:
+            conn.run()
+        finally:
+            conn.close()
+            sink.close()
 
         files, counts = {}, {}
-        if bars:
-            path, n = write_bars(out_root, self.market, self.provider, symbol, seconds, bars)
-            files["bars"], counts["bars"] = path, n
-        if trades:
-            path, n = write_trades(out_root, self.market, self.provider, symbol, trades)
-            files["trades"], counts["trades"] = path, n
-        if quotes:
-            path, n = write_quotes(out_root, self.market, self.provider, symbol, quotes)
-            files["quotes"], counts["quotes"] = path, n
+        if stream_to_disk:
+            for kind, path in sink.files.items():
+                files[kind] = path
+                counts[kind] = sink.counts.get(kind, 0)
+        else:
+            if bars:
+                path, n = write_bars(out_root, self.market, self.provider, symbol, seconds, bars)
+                files["bars"], counts["bars"] = path, n
+            if trades:
+                path, n = write_trades(out_root, self.market, self.provider, symbol, trades)
+                files["trades"], counts["trades"] = path, n
+            if quotes:
+                path, n = write_quotes(out_root, self.market, self.provider, symbol, quotes)
+                files["quotes"], counts["quotes"] = path, n
         print(f"  [bybit] live session closed: bars={len(bars)} trades={len(trades)} quotes={len(quotes)}")
         return FeedResult(self.market, self.provider, symbol, "live", files, counts, str(out_root))

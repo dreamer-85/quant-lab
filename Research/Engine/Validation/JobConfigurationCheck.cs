@@ -244,8 +244,15 @@ namespace QuantConnect.Research.Engine.Validation
         }
 
         /// <summary>
-        /// Depth-dependent features are identically zero unless the job subscribes to order book
-        /// events. This is the single most common cause of a "my imbalance condition never fires" run.
+        /// Depth-dependent features read the top of book, and a quote carries the size resting
+        /// at the best bid and ask, so a quote-only job does get a real (if shallow) imbalance.
+        /// Only a job with neither quotes nor book events is guaranteed to read a flat zero.
+        ///
+        /// Previously this fired whenever book features were requested without an
+        /// <c>OrderBookUpdate</c> subscription, which sent people off to capture L2 they did not
+        /// need: top-of-book depth is enough to compute imbalance, and demanding deltas for it
+        /// was advice that was both unavailable for historical data and unnecessary for the
+        /// feature.
         /// </summary>
         private static void CheckDepthDependencies(ResearchJob job, ValidationReport report)
         {
@@ -267,16 +274,35 @@ namespace QuantConnect.Research.Engine.Validation
                 return;
             }
 
+            if (eventTypes.Contains(MarketEventType.Quote))
+            {
+                // Quotes seed the top of book, so these resolve to real numbers. Worth saying
+                // out loud, because "level-1 only" looks like a reason to distrust the numbers
+                // and it is not: it just means depth beyond the best bid/ask is unknown.
+                report.Add(new ValidationFinding
+                {
+                    Check = ValidationCheckIds.Config,
+                    Severity = ValidationSeverity.Warning,
+                    Message = $"Job requests order-book feature(s) [{string.Join(", ", affected)}] with " +
+                              "quotes but no OrderBookUpdate events, so depth is top-of-book only: " +
+                              "bid_depth/ask_depth are the size at the best bid/ask and imbalance " +
+                              "compares those two. That is a valid imbalance, but it ignores every " +
+                              "level behind the top. Add 'OrderBookUpdate' and stage " +
+                              "book_updates.csv for a multi-level book."
+                });
+                return;
+            }
+
             report.Add(new ValidationFinding
             {
                 Check = ValidationCheckIds.Config,
                 Severity = ValidationSeverity.Error,
                 Message = $"Job selects order-book-dependent feature(s) [{string.Join(", ", affected)}] but " +
-                          $"eventTypes is [{string.Join(", ", eventTypes)}], which contains no order book type. " +
-                          "These features will be constant 0.0 for every observation. Add " +
-                          "'OrderBookUpdate' and stage book_updates.csv (feed mode), or drop the features. " +
-                          "Note that no exchange REST endpoint serves historical L2 deltas, so " +
-                          "book_updates.csv must come from a websocket capture."
+                          $"eventTypes is [{string.Join(", ", eventTypes)}], which contains neither quotes nor " +
+                          "an order book type. These features will be constant 0.0 for every observation. " +
+                          "Add 'Quote' (which carries the size at the best bid/ask and is enough for " +
+                          "top-of-book imbalance), or add 'OrderBookUpdate' and stage book_updates.csv " +
+                          "(feed mode) for a multi-level book."
             });
         }
 

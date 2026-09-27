@@ -240,6 +240,46 @@ namespace QuantConnect.Tests.Research.EngineTests
         }
 
         [Test]
+        public void Feed_ReadsBookUpdatesExactlyAsTheCaptureWriterEmitsThem()
+        {
+            // The capture writer (DataFeeds) and this reader were written independently and share only
+            // this file format. These are the literal strings
+            // datafeeds.providers.crypto.book_capture produces for a bybit snapshot row, a resize and a
+            // zero-size deletion, so a change to either side's vocabulary fails here instead of
+            // silently reconstructing a book that never changes.
+            var root = TempFeedRoot();
+            var job = BuildJob();
+            job.Source = new JobDataSource { Mode = "feed", Provider = "bybit" };
+            job.EventTypes = new List<MarketEventType> { MarketEventType.OrderBookUpdate };
+
+            var dir = Path.Combine(root, "crypto", "bybit", "BTCUSDT");
+            Directory.CreateDirectory(dir);
+            File.WriteAllLines(Path.Combine(dir, "book_updates.csv"), new[]
+            {
+                "timestamp_ms,side,price,quantity,action",
+                "1704067200000,bid,42000.0,2.0,add",     // opening snapshot level
+                "1704067200000,ask,42010.0,3.0,add",     // opening snapshot level
+                "1704067230000,bid,42000.0,7.0,add",     // resized in place: absolute size, not a delta
+                "1704067260000,ask,42010.0,0.0,remove",  // zero size is the only delete signal the venue gives
+            });
+
+            var source = new LocalFeedDataSource(job, job.Source, feedRoot: root);
+            var events = EventStreamMerger.Merge(source.GetEventStreams(job, _symbol))
+                .OfType<OrderBookUpdateEvent>()
+                .ToList();
+
+            Assert.That(events, Has.Count.EqualTo(4));
+            Assert.That(events[0].Side, Is.EqualTo(OrderBookSide.Bid));
+            Assert.That(events[0].Action, Is.EqualTo(OrderBookUpdateAction.Add));
+            Assert.That(events[0].Quantity, Is.EqualTo(2m));
+            Assert.That(events[1].Side, Is.EqualTo(OrderBookSide.Ask));
+            Assert.That(events[2].Quantity, Is.EqualTo(7m), "a resize must keep its absolute size");
+            Assert.That(events[3].Action, Is.EqualTo(OrderBookUpdateAction.Remove),
+                "a zero-quantity row must remove the level, not add a zero-sized one");
+            Assert.That(events[3].Quantity, Is.EqualTo(0m));
+        }
+
+        [Test]
         public void Feed_HypothesisExperimentResolvesForwardOutcomesEndToEnd()
         {
             var root = TempFeedRoot();

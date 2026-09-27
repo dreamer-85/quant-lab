@@ -244,12 +244,56 @@ namespace QuantConnect.Research.Engine.MarketState
                 AskSize = quote.AskSize;
             }
 
+            // A quote states the size resting at the best bid and ask, which is top-of-book
+            // depth. Seeding it into the level lists is what makes BidDepth/AskDepth, and
+            // therefore imbalance, mean anything on a quote-only feed. Without this the depth
+            // sums stay zero unless the feed also carries L2 deltas, and every depth-derived
+            // feature silently reads a flat zero.
+            SeedTopOfBook(_bidLevels, quote.BidPrice, quote.BidSize, descending: true);
+            SeedTopOfBook(_askLevels, quote.AskPrice, quote.AskSize, descending: false);
+
             QuoteUpdateCount++;
 
             // Add to recent quotes
             _recentQuotes.Add(quote);
             if (_recentQuotes.Count > MaxRecentQuotes)
                 _recentQuotes.RemoveAt(0);
+        }
+
+        /// <summary>
+        /// Applies a quoted top-of-book price and its resting size to a side's level list.
+        ///
+        /// The quote is authoritative about the top and about nothing else:
+        ///   - a level at the quoted price is replaced, because the venue is reporting the
+        ///     current total there, not a delta to add;
+        ///   - levels better than the quoted price are dropped, because a venue whose best bid
+        ///     is 100.5 is not also resting size above 100.5;
+        ///   - levels behind the top are left alone, since a quote carries no information
+        ///     about them. This means depth on a quote-only feed is the top level plus
+        ///     whatever L2 previously established, and a level the book has moved away from
+        ///     keeps its last known size until an L2 update corrects it.
+        ///   - a quoted size of zero is not a withdrawal: some venues omit size entirely, and
+        ///     treating that as "level removed" would make imbalance flicker to zero on every
+        ///     such tick. Zero is ignored unless the price moved.
+        /// </summary>
+        private static void SeedTopOfBook(List<OrderBookLevel> levels, decimal price, decimal size, bool descending)
+        {
+            if (price <= 0)
+            {
+                return;
+            }
+
+            // Levels better than the quoted top cannot exist.
+            levels.RemoveAll(l => descending ? l.Price > price : l.Price < price);
+
+            if (size <= 0)
+            {
+                return;
+            }
+
+            levels.RemoveAll(l => l.Price == price);
+            levels.Add(new OrderBookLevel { Price = price, Quantity = size });
+            levels.Sort((a, b) => descending ? b.Price.CompareTo(a.Price) : a.Price.CompareTo(b.Price));
         }
 
         /// <summary>

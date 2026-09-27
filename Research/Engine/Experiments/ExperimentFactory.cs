@@ -43,7 +43,7 @@ namespace QuantConnect.Research.Engine.Experiments
             if (experiments.Any(e => e == null))
             {
                 var missing = names.Zip(experiments, (n, e) => e == null ? n : null).First(n => n != null);
-                throw new InvalidOperationException($"Unknown experiment '{missing}' in experimentName list '{job.ExperimentName}'. Known experiments: liquidity_trend, hypothesis, python_strategy.");
+                throw new InvalidOperationException($"Unknown experiment '{missing}' in experimentName list '{job.ExperimentName}'. Known experiments: liquidity_trend, hypothesis, position, python_strategy, script_trade.");
             }
 
             return new CompositeExperiment(experiments);
@@ -55,7 +55,9 @@ namespace QuantConnect.Research.Engine.Experiments
             {
                 "liquidity_trend" => new LiquidityTrendExperiment(),
                 "python_strategy" => new PythonStrategyExperiment(job),
+                "script_trade" => new ScriptTradeExperiment(job),
                 "hypothesis" => new HypothesisExperiment(),
+                "position" => new PositionExperiment(),
                 _ => null
             };
         }

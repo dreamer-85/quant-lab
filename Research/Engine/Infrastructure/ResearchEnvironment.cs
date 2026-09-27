@@ -58,12 +58,43 @@ namespace QuantConnect.Research.Engine
         /// </summary>
         public ResearchEnvironment(string dataRoot = null, string outputRoot = null, string cacheRoot = null, string tempRoot = null)
         {
-            var output = First(outputRoot, GetEnv(OutputRootEnvVar), Path.Combine(Path.GetTempPath(), "QuantLab"));
+            // Normalize every root to an absolute path, once, here.
+            //
+            // These roots are the base for paths the engine builds and then hands to the
+            // storage layer, which resolves a *relative* path against its own root. If a root
+            // stays relative ("out"), the engine builds "out/<job>/experiment/table.csv" and
+            // the store resolves that against the already-absolute root, writing to
+            // "<root>/out/<job>/..." -- the output silently appears nested one level deeper
+            // than the manifest, and nothing errors. Making roots absolute here means the
+            // store recognizes every engine path as rooted and uses it as-is.
+            var output = Absolute(First(outputRoot, GetEnv(OutputRootEnvVar), Path.Combine(Path.GetTempPath(), "QuantLab")));
             OutputRoot = output;
-            var data = First(dataRoot, GetEnv(DataRootEnvVar), Globals.DataFolder);
+            var data = Absolute(First(dataRoot, GetEnv(DataRootEnvVar), Globals.DataFolder));
             DataRoot = data;
-            CacheRoot = First(cacheRoot, GetEnv(CacheRootEnvVar), Path.Combine(output, "cache"));
-            TempRoot = First(tempRoot, GetEnv(TempRootEnvVar), Path.GetTempPath());
+            CacheRoot = Absolute(First(cacheRoot, GetEnv(CacheRootEnvVar), Path.Combine(output, "cache")));
+            TempRoot = Absolute(First(tempRoot, GetEnv(TempRootEnvVar), Path.GetTempPath()));
+        }
+
+        /// <summary>
+        /// Resolves a root to an absolute path without requiring it to exist yet.
+        /// </summary>
+        private static string Absolute(string root)
+        {
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return Directory.GetCurrentDirectory();
+            }
+
+            try
+            {
+                return Path.GetFullPath(root);
+            }
+            catch (Exception)
+            {
+                // A malformed path should surface when it is used, not while the environment is
+                // being constructed; fall back to the value as given.
+                return root;
+            }
         }
 
         /// <summary>

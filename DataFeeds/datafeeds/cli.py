@@ -48,9 +48,40 @@ def _build_parser() -> argparse.ArgumentParser:
     pull.add_argument("--no-quotes", dest="quotes", action="store_false", help="Disable quotes")
     pull.add_argument("--app-id", type=int, default=None, help="Deriv app_id (default: 1089)")
     pull.add_argument("--api-token", default=None, help="Deriv API token (authorizes the session when supplied)")
+    pull.add_argument("--stream-to-disk", dest="stream_to_disk", action="store_true",
+                      help="Append rows to the staged CSVs as they arrive instead of writing at the end (live only). "
+                           "Use this when a reader has to watch a live session while it is still running.")
     pull.add_argument("--category", default="spot", help="Bybit category: spot | linear")
     pull.add_argument("--market-type", dest="market_type", default="spot", help="Binance market: spot | usdm")
+
+    cap = sub.add_parser(
+        "capture",
+        help="Capture L2 order book deltas into book_updates.csv (websocket capture; no REST equivalent)",
+    )
+    cap.add_argument("--market", required=True, choices=["crypto"], help="Market bucket")
+    cap.add_argument("--provider", required=True, help="Capture provider (bybit)")
+    cap.add_argument("--symbol", required=True, help="Provider-native symbol, e.g. BTCUSDT")
+    cap.add_argument("--duration", type=float, default=60.0, help="Capture length in seconds")
+    cap.add_argument("--out", "-o", default="feeds", help="Feed output root (default: feeds)")
+    cap.add_argument(
+        "--depth",
+        type=int,
+        default=50,
+        help="Book depth level to subscribe (min 50; shallower depths are snapshots, not deltas)",
+    )
+    cap.add_argument("--category", default="spot", help="Bybit category: spot | linear")
     return parser
+
+
+def _run_capture(args: argparse.Namespace) -> FeedResult:
+    feed_cls = get_feed(args.market, args.provider, "capture")
+    return feed_cls().capture(
+        args.symbol,
+        duration_seconds=args.duration,
+        out_root=args.out,
+        depth=args.depth,
+        category=args.category,
+    )
 
 
 def _run_pull(args: argparse.Namespace) -> FeedResult:
@@ -85,6 +116,7 @@ def _run_pull(args: argparse.Namespace) -> FeedResult:
         api_token=args.api_token,
         category=args.category,
         market=args.market_type,
+        stream_to_disk=args.stream_to_disk,
     )
 
 
@@ -101,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{row['market']:<7} {row['provider']:<{width}} {row['mode']:<12} {row['description']}")
             return 0
 
-        result = _run_pull(args)
+        result = _run_capture(args) if args.command == "capture" else _run_pull(args)
         print()
         print(result.describe())
         return 0

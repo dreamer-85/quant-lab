@@ -101,10 +101,19 @@ rows), `summary.txt` (provenance + counts at a glance), and `manifest.json`
 first/last timestamps, so the pulled data's completeness is checkable.
 
 Bars/trades/quotes auto-pull from the provider. Order-book event types are not
-staged by providers yet — the orchestrator prints a note and they resolve to
-`0.0` features unless you add `book_updates.csv` by hand under
-`<data-dir>/<market>/<exchange>/<symbol>/` (see [research-job.md](research-job.md)
-→ feed mode).
+staged by providers — the orchestrator prints a note and they resolve to `0.0`
+features unless `book_updates.csv` is present under
+`<data-dir>/<market>/<exchange>/<symbol>/`. Capture it from the venue's delta
+stream before the run:
+
+```
+python -m datafeeds capture --market crypto --provider bybit --symbol BTCUSDT ^
+  --duration 600 --depth 50 --out <data-dir>
+```
+
+The capture keeps the opening snapshot and refuses to stage a file without one,
+because the engine rebuilds the book from an empty state (see
+[research-job.md](research-job.md) → feed mode).
 
 ### Live sessions
 
@@ -577,15 +586,28 @@ class Strategy:
 ## Requirements and limits
 
 - **Python runtime.** The engine loads scripts through pythonnet (package
-  `QuantConnect.pythonnet`, pinned in `Common`/`Research.Engine`). pythonnet
-  does not auto-detect per-user Python installs, so point it at your DLL before
-  running any python job:
+  `QuantConnect.pythonnet`, pinned in `Common`/`Research.Engine`).
+
+  Most distributions ship a shared `libpythonX.Y.so` next to the interpreter, but
+  pythonnet cannot find it on its own: it looks for a library named after the
+  running process and otherwise fails with a bare "Failed to initialize the
+  Python runtime". The engine therefore asks the `python3` on `PATH` where its
+  shared library is and sets it automatically, so python jobs work without any
+  environment setup.
+
+  `PYTHONNET_PYDLL` still wins when set, because an explicit choice should not
+  be second-guessed. Set it to point at a different interpreter:
+
+  ```bash
+  PYTHONNET_PYDLL=/usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0 quantlab run --job job.json
+  ```
 
   ```powershell
   $env:PYTHONNET_PYDLL = "C:\Users\KONZA\AppData\Local\Programs\Python\Python313\python313.dll"
   ```
 
-  (pythonnet 2.0.66 was verified here against Python 3.13.) Without a usable
+  A statically linked interpreter genuinely has no shared library; there
+  discovery finds nothing, `PYTHONNET_PYDLL` is the way in. Without a usable
   runtime the job fails with a clear `StrategyScriptException`; the engine and
   all non-python experiments are unaffected. To use a virtual environment, set
   `PYTHONNET_PYDLL` to the base install and activate it from `initialize`
@@ -598,8 +620,8 @@ class Strategy:
   `NaN` and `Infinity` are rejected before serialization, because neither is
   valid JSON and both would otherwise reach the output as a silently corrupt
   value: returning `float('nan')` raises `StrategyScriptException` naming the
-  offending row. Guard divisions yourself and return `None` or an explicit
-  sentinel instead.
+  offending key path, e.g. `rows[1].close: NaN`. Guard divisions yourself and
+  return `None` or an explicit sentinel instead.
 
   This only applies to what the script returns. A Python value of `nan` that
   stays inside the script is fine.

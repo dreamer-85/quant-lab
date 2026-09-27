@@ -29,11 +29,18 @@ class FeedResult:
     output_files: dict = field(default_factory=dict)
     counts: dict = field(default_factory=dict)  # feed kind -> row count
     feed_root: str = ""
+    #: Diagnostics that do not belong in ``counts`` but must not be dropped either — sequence gaps,
+    #: whether a capture got its opening snapshot, rows by kind. Surfaced by the CLI so a staged file
+    #: can be judged rather than merely counted.
+    summary_extra: dict = field(default_factory=dict)
 
     def describe(self) -> str:
         lines = [f"feed   : {self.market}/{self.provider} [{self.mode}] {self.symbol}"]
         for kind in sorted(self.output_files):
             lines.append(f"{kind:<7}: {self.output_files[kind]} ({self.counts.get(kind, 0)} rows)")
+        if self.summary_extra:
+            for key in sorted(self.summary_extra):
+                lines.append(f"{key:<7}: {self.summary_extra[key]}")
         return "\n".join(lines)
 
 

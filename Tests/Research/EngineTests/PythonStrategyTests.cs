@@ -258,6 +258,19 @@ namespace QuantConnect.Tests.Research.EngineTests
             Assert.That(((List<object>)obs["bid_levels"]), Is.Not.Empty);
         }
 
+        [TestCase("{\"bad\": NaN, \"close\": 1.0}", "bad: NaN")]
+        [TestCase("{\"a\": Infinity}", "a: Infinity")]
+        [TestCase("{\"a\": -Infinity}", "a: -Infinity")]
+        [TestCase("{\"rows\": [{\"close\": 1.0}, {\"close\": NaN}]}", "rows[1].close: NaN")]
+        [TestCase("{\"outer\": {\"inner\": NaN}}", "outer.inner: NaN")]
+        public void NonFiniteDetection_NamesTheOffendingKeyPath(string json, string expected)
+        {
+            // Naming the key is the point: "Offending value: NaN" leaves the author hunting for it,
+            // "rows[1].close: NaN" is a fix. Asserting the exact path also proves the substituted
+            // document really parsed, rather than degrading to a bare token list.
+            Assert.That(PythonNetStrategyHost.FindNonFiniteTokens(json), Does.Contain(expected));
+        }
+
         [TestCase("{\"bad\": NaN, \"close\": 1.0}", "NaN")]
         [TestCase("{\"a\": Infinity}", "Infinity")]
         [TestCase("{\"a\": -Infinity}", "-Infinity")]

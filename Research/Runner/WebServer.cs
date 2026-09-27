@@ -1,33 +1,45 @@
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace QuantConnect.Research.Runner
 {
     /// <summary>
-    /// Cloud Run service front-end over the research engine.
-    /// Start with `--web` to run as an HTTP service (Kestrel) instead of a
-    /// one-shot CLI job. The container binds 0.0.0.0:$PORT (default 8080),
-    /// which works with Cloud Run's startup/health probes.
+    /// Web front-end over the research engine.
+    ///
+    /// Two jobs are served here. <c>/run</c> and <c>/run-job-file</c> execute a job and return its
+    /// result, unchanged, for callers that want a completed answer. The live surface does the
+    /// opposite: it starts a session, then streams the account as it is rebuilt from data still
+    /// arriving, over Server-Sent Events. SSE rather than WebSockets because the traffic is one-way
+    /// and a plain <c>EventSource</c> needs no client library, which matters when the page has to
+    /// work by just being opened.
     ///
     /// Endpoints:
-    ///   GET  /healthz        -> 200 OK (probe target)
-    ///   GET  /               -> service info JSON
-    ///   POST /run            -> executes a job from a JSON body; returns the
-    ///                           execution result + manifest (HTTP 200 on
-    ///                           success, 400 on bad job, 500 on crash)
-    ///   POST /run-job-file   -> same, but the body is { "jobFile": "...", ... }
-    ///                           (less common; the /run document form is preferred)
+    ///   GET  /healthz                 -> 200 OK (probe target)
+    ///   GET  /                        -> the live UI
+    ///   POST /run                     -> execute a job from a JSON body
+    ///   POST /run-job-file            -> execute a job from a path in the body
+    ///   GET  /api/live                 -> list active sessions
+    ///   POST /api/live                 -> start a session, returns { runId }
+    ///   GET  /api/live/{id}            -> session state and latest metrics
+    ///   POST /api/live/{id}/stop       -> stop a session
+    ///   GET  /api/live/{id}/stream     -> SSE: status, equity, trade, summary, log, complete
+    ///   GET  /api/live/{id}/trades     -> the full trade log as JSON
+    ///   GET  /api/live/{id}/portfolio  -> the full equity curve as JSON
     /// </summary>
     public static class WebServer
     {
+        private static LiveRunManager _live;
+
         public static async Task<int> Run(string[] args)
         {
             string dataDir = null;
             string outputDir = null;
             string portOverride = null;
+            string workRoot = null;
+            string datafeeds = null;
             for (var i = 0; i < args.Length; i++)
             {
                 switch (args[i])
@@ -41,15 +53,22 @@ namespace QuantConnect.Research.Runner
                     case "--port":
                         portOverride = args[++i];
                         break;
+                    case "--work-root":
+                        workRoot = args[++i];
+                        break;
+                    case "--datafeeds":
+                        datafeeds = args[++i];
+                        break;
                     default:
                         Console.Error.WriteLine($"Unknown argument: {args[i]}");
                         return 2;
                 }
             }
 
-            var port = portOverride
-                ?? Environment.GetEnvironmentVariable("PORT")
-                ?? "8080";
+            var port = portOverride ?? Environment.GetEnvironmentVariable("PORT") ?? "8080";
+            var resolvedDatafeeds = datafeeds ?? "datafeeds";
+            var resolvedWork = workRoot ?? Path.Combine(Path.GetTempPath(), "quantlab-live");
+            _live = new LiveRunManager(resolvedDatafeeds, resolvedWork);
 
             var builder = WebApplication.CreateBuilder(args);
             builder.Logging.ClearProviders();
@@ -57,14 +76,148 @@ namespace QuantConnect.Research.Runner
             var app = builder.Build();
 
             app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
-            app.MapGet("/", () => Results.Ok(new
+
+            app.MapGet("/", () => Results.Content(Ui.Html, "text/html; charset=utf-8"));
+
+            app.MapGet("/api/live", () => Results.Json(new
             {
-                service = "quantlab-research-runner",
-                mode = "web",
-                port,
-                dataDir = dataDir ?? Environment.GetEnvironmentVariable("QUANTLAB_DATA_ROOT") ?? "default",
-                outputDir = outputDir ?? Environment.GetEnvironmentVariable("QUANTLAB_OUTPUT_ROOT") ?? "default"
+                active = _live.Active.Select(r => new
+                {
+                    r.Id,
+                    r.Status,
+                    r.Request.Symbol,
+                    r.Request.Provider,
+                    r.Request.DurationSeconds,
+                    workDir = r.WorkDir
+                })
             }));
+
+            app.MapPost("/api/live", async (HttpContext ctx) =>
+            {
+                try
+                {
+                    LiveRunRequest request;
+                    using var reader = new StreamReader(ctx.Request.Body);
+                    var body = await reader.ReadToEndAsync(ctx.RequestAborted);
+                    request = string.IsNullOrWhiteSpace(body)
+                        ? new LiveRunRequest()
+                        : JsonSerializer.Deserialize<LiveRunRequest>(body,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                          ?? new LiveRunRequest();
+
+                    if (request is { DurationSeconds: <= 0 or > 3600, TickSeconds: <= 0 })
+                    {
+                        return Results.BadRequest(new
+                        {
+                            error = "duration must be 1..3600 seconds and tick at least 1 second"
+                        });
+                    }
+
+                    var run = _live.Start(request);
+                    return Results.Json(new { runId = run.Id, status = run.Status, workDir = run.WorkDir });
+                }
+                catch (Exception ex)
+                {
+                    return Results.Json(new { error = ex.Message }, statusCode: 400);
+                }
+            });
+
+            app.MapGet("/api/live/{id}", (string id) =>
+            {
+                var run = _live.Get(id);
+                return run == null
+                    ? Results.NotFound(new { error = $"no session {id}" })
+                    : Results.Json(new
+                    {
+                        run.Id,
+                        run.Status,
+                        run.Request,
+                        metrics = run.LastMetrics,
+                        workDir = run.WorkDir
+                    });
+            });
+
+            app.MapPost("/api/live/{id}/stop", (string id) =>
+            {
+                var run = _live.Get(id);
+                if (run == null)
+                {
+                    return Results.NotFound(new { error = $"no session {id}" });
+                }
+
+                run.Stop();
+                return Results.Json(new { runId = id, status = "stopping" });
+            });
+
+            app.MapGet("/api/live/{id}/trades", (string id) =>
+            {
+                var run = _live.Get(id);
+                if (run == null)
+                {
+                    return Results.NotFound(new { error = $"no session {id}" });
+                }
+
+                return Results.Json(ReadTable(run, "trades"));
+            });
+
+            app.MapGet("/api/live/{id}/portfolio", (string id) =>
+            {
+                var run = _live.Get(id);
+                if (run == null)
+                {
+                    return Results.NotFound(new { error = $"no session {id}" });
+                }
+
+                return Results.Json(ReadTable(run, "portfolio"));
+            });
+
+            // Server-Sent Events. Each message is one JSON object, which the page dispatches on
+            // its "type". The replay buffer means a client connecting mid-session still receives
+            // the curve so far instead of an empty chart.
+            app.MapGet("/api/live/{id}/stream", async (HttpContext ctx, string id) =>
+            {
+                var run = _live.Get(id);
+                if (run == null)
+                {
+                    ctx.Response.StatusCode = 404;
+                    await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = $"no session {id}" }));
+                    return;
+                }
+
+                ctx.Response.Headers["Content-Type"] = "text/event-stream";
+                ctx.Response.Headers["Cache-Control"] = "no-cache";
+                ctx.Response.Headers["Connection"] = "keep-alive";
+                ctx.Response.Headers["X-Accel-Buffering"] = "no";
+
+                var channel = run.Subscribe();
+                try
+                {
+                    foreach (var line in run.DrainBuffer())
+                    {
+                        await ctx.Response.WriteAsync($"data: {line}\n\n", ctx.RequestAborted);
+                    }
+
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+
+                    await foreach (var line in channel.Reader.ReadAllAsync(ctx.RequestAborted))
+                    {
+                        await ctx.Response.WriteAsync($"data: {line}\n\n", ctx.RequestAborted);
+                        await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // The browser navigated away or closed the tab. Normal.
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"stream error: {ex.Message}");
+                }
+                finally
+                {
+                    run.Unsubscribe(channel);
+                }
+            });
 
             app.MapPost("/run", async (HttpContext ctx) =>
             {
@@ -81,19 +234,7 @@ namespace QuantConnect.Research.Runner
                         jobJson,
                         dataDir: dataDir ?? Environment.GetEnvironmentVariable("QUANTLAB_DATA_ROOT"),
                         outputDir: outputDir ?? Environment.GetEnvironmentVariable("QUANTLAB_OUTPUT_ROOT"));
-                    return Results.Json(new
-                    {
-                        jobId = result.JobId,
-                        succeeded = result.Succeeded,
-                        error = result.Error,
-                        symbolsProcessed = result.SymbolsProcessed,
-                        symbolsReused = result.SymbolsReused,
-                        eventsProcessed = result.EventsProcessed,
-                        observationsWritten = result.ObservationsWritten,
-                        outputFiles = result.OutputFiles,
-                        elapsedSeconds = result.Elapsed.TotalSeconds,
-                        manifestPath
-                    }, statusCode: result.Succeeded ? 200 : 200);
+                    return Results.Json(Summarize(result, manifestPath));
                 }
                 catch (Exception ex)
                 {
@@ -114,25 +255,14 @@ namespace QuantConnect.Research.Runner
                     {
                         return Results.BadRequest(new { error = $"job file not found: {jobFile}" });
                     }
+
                     var reqDataDir = req.TryGetProperty("dataDir", out var dd) ? dd.GetString() : null;
                     var reqOutputDir = req.TryGetProperty("outputDir", out var od) ? od.GetString() : null;
                     var (result, manifestPath) = Program.ExecuteJobFile(
                         jobFile,
                         dataDir: reqDataDir ?? dataDir ?? Environment.GetEnvironmentVariable("QUANTLAB_DATA_ROOT"),
                         outputDir: reqOutputDir ?? outputDir ?? Environment.GetEnvironmentVariable("QUANTLAB_OUTPUT_ROOT"));
-                    return Results.Json(new
-                    {
-                        jobId = result.JobId,
-                        succeeded = result.Succeeded,
-                        error = result.Error,
-                        symbolsProcessed = result.SymbolsProcessed,
-                        symbolsReused = result.SymbolsReused,
-                        eventsProcessed = result.EventsProcessed,
-                        observationsWritten = result.ObservationsWritten,
-                        outputFiles = result.OutputFiles,
-                        elapsedSeconds = result.Elapsed.TotalSeconds,
-                        manifestPath
-                    }, statusCode: 200);
+                    return Results.Json(Summarize(result, manifestPath));
                 }
                 catch (Exception ex)
                 {
@@ -142,8 +272,66 @@ namespace QuantConnect.Research.Runner
 
             app.Urls.Add($"http://0.0.0.0:{port}");
             Console.WriteLine($"quantlab web server listening on http://0.0.0.0:{port}");
+            Console.WriteLine($"  datafeeds : {resolvedDatafeeds}");
+            Console.WriteLine($"  work root : {resolvedWork}");
             await app.RunAsync();
             return 0;
+        }
+
+        private static object Summarize(object result, string manifestPath)
+        {
+            var type = result.GetType();
+            object Get(string name) => type.GetProperty(name)?.GetValue(result);
+
+            return new
+            {
+                jobId = Get("JobId"),
+                succeeded = Get("Succeeded"),
+                error = Get("Error"),
+                symbolsProcessed = Get("SymbolsProcessed"),
+                symbolsReused = Get("SymbolsReused"),
+                eventsProcessed = Get("EventsProcessed"),
+                observationsWritten = Get("ObservationsWritten"),
+                outputFiles = Get("OutputFiles"),
+                manifestPath
+            };
+        }
+
+        private static List<Dictionary<string, object>> ReadTable(LiveRun run, string table)
+        {
+            var path = Path.Combine(run.WorkDir, "out", $"live-{run.Id}", "experiment",
+                $"{run.Request.ExperimentName}_{table}.csv");
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            var rows = new List<Dictionary<string, object>>();
+            var lines = File.ReadAllLines(path);
+            if (lines.Length < 2)
+            {
+                return rows;
+            }
+
+            var header = lines[0].Split(',');
+            foreach (var line in lines.Skip(1))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                var cells = line.Split(',');
+                var row = new Dictionary<string, object>();
+                for (var i = 0; i < header.Length && i < cells.Length; i++)
+                {
+                    row[header[i]] = cells[i];
+                }
+
+                rows.Add(row);
+            }
+
+            return rows;
         }
     }
 }
